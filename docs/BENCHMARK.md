@@ -167,6 +167,7 @@ The negative-results section is mandatory — it is also our tuning signal.
 | **ContextBench** (arXiv 2602.05892) | 1,136 tasks, 66 repos, 8 languages, human-annotated gold contexts; recall/precision/efficiency on *explored vs utilized* context | Our intrinsic metrics align deliberately (recall/precision/efficiency framing); cross-evaluating ContextSlice on their public gold contexts is a Phase 6 goal — third-party gold sets are the strongest credibility signal |
 | **SWE-ContextBench** (arXiv 2602.08316) | 1,100 + 376 tasks measuring resolution/runtime/token cost under context-reuse strategies | Validates our thesis (well-selected context helps, unfiltered hurts); our extrinsic tier adapts its cost-accounting |
 | **SWE-bench (Verified/Lite)** | Issue → patch, fail-to-pass judging | Source of Python extrinsic tasks; we do not claim SWE-bench leaderboard comparability (different scaffold) |
+| **Graft** (trailhq/Graft, MIT) | Graph CLI/MCP; publishes **SWE-bench Verified** results (official `swebench` 4.1.0 grader, n=50, +12 pts correctness, +23% tokens) alongside a self-run controlled sweep | The **one counterexample** to "nobody publishes agent outcomes": we found it on 2026-09-15, and it means our claim must be narrower. Two limits matter: the harness for its controlled sweep was removed from the public repo (CHANGELOG v0.7.0, "The `bench/` benchmark harness is no longer part of the published repo"), and n=50 is underpowered — a paired McNemar exact test at α=0.05 detects a true 12-point effect only ~27% of the time. **Consequence for us:** we must publish the harness, the corpus manifests, the seeds and the per-task logs, and size the extrinsic tier for the effect we intend to claim (BENCHMARK §4.2). "Reproducible *and* adequately powered" is the standard; "first to publish" is not a claim we make. |
 | **Aider polyglot** | 225 Exercism exercises, edit-format focused | Not used: exercises are self-contained single files — context selection is untested by construction |
 | **Terminal-bench** | Docker terminal tasks | Out of scope; no repo-context manipulation |
 
@@ -176,6 +177,16 @@ Allowed claims (with linked runs): "on our published corpus, ContextSlice select
 gold files with median recall X at Y tokens vs Z for naive crawl". Forbidden claims:
 "2× better context", universal token-reduction percentages, implications about
 arbitrary agents/models. Every README number links to `docs/benchmarks/<version>/`.
+
+**Claims of absence are forbidden outright.** Statements of the form "nobody does X" or
+"no tool in this category ships Y" are not permitted in any public artifact, because we
+cannot verify a negative, they decay silently, and one counterexample makes the whole
+document untrustworthy. We assert only what *we* measure, on our corpus, with our
+harness. Where a competitor's behaviour is relevant, describe it precisely and cite their
+source with a date — for example "Repomix's `--token-budget` exits non-zero after
+producing the over-budget pack (their docs, 2026-09-15)" rather than "packers can't fit
+a budget". This rule exists because the project's own founding documents got this wrong
+twice (see ADR-016).
 
 ## 8. Corpus governance
 

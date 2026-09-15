@@ -323,8 +323,8 @@ beat deterministic recall by ≥5 points on the intrinsic benchmark to ship *ena
 | Intent signal | Chat keywords + files already in chat | The task itself, parsed deterministically |
 | Graph | File graph from tree-sitter tags; edge weight `use_mul·√refs` | Same core idea; edge kinds split (import/ref/test) with distinct weights |
 | Ranking | Personalized PageRank to convergence | 2-hop bounded walk, order-normalized |
-| Output | One signatures-only map (~1k tokens default) | Mixed L0–L5 artifact, budget-fitted via demotion ladder |
-| Budget | Binary search over tag count, ±15% | Greedy demotion with hard never-exceed invariant |
+| Output | One signatures-only map | Mixed L0–L5 artifact, budget-fitted via demotion ladder |
+| Budget | Binary search over tag count, soft: accepts a tree within **15% error** (`ok_err = 0.15` in `repomap.py`), so the map may exceed its target; the CLI calls the value *"Suggested"* | Greedy demotion with a hard never-exceed invariant (property-tested) |
 | Persistence | SQLite tag cache (mtime-keyed) | Full versioned index (symbols/refs/edges/FTS5) reused across sessions & agents |
 | Availability | Inside aider only | Standalone CLI + MCP for any agent |
 | Explainability | None | `--explain` traces every decision |
@@ -333,3 +333,12 @@ We also borrow, with credit: the sqrt-damping insight from aider's edge weights,
 ">5 files ⇒ uninformative name" dampener (as our 256-candidate cap), and Repomix's
 observation that AST-aware compression (~70% reduction) is viable — our L2/L3 levels
 are the budget-aware generalization of it.
+
+**Correction to a widely-repeated figure (verified 2026-09-15).** Aider's repo map is
+often described as "~1k tokens". That comes from its documentation, not its code:
+`Model.get_repo_map_tokens()` computes `clamp(max_input_tokens / 8, 1024, 4096)`, so any
+model with ≥32,768 input tokens gets **4096**, and 1024 is only the floor and the
+fallback when the model's input size is unknown. The same function's budget is also soft
+rather than enforced. We state this because we compare against aider in public, and
+because a stale competitor figure is exactly the kind of error this project's benchmark
+discipline exists to prevent.

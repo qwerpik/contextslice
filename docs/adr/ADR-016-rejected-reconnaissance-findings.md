@@ -1,10 +1,11 @@
-# ADR-015: Reconnaissance findings rejected, and why
+# ADR-016: Reconnaissance findings rejected, and why
 
 | | |
 |---|---|
 | **Status** | Accepted |
 | **Date** | 2026-09-15 |
 | **Milestone** | Bootstrap |
+| **Preceded by** | [ADR-015](ADR-015-competitive-landscape-verification.md) |
 
 ## Context
 

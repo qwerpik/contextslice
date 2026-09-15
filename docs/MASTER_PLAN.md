@@ -87,12 +87,22 @@ this plan was written. Verdict: **the core idea survives, but three assumptions 
    assembly, CI/review pipelines, planning documents, humans pasting context into a chat.
 
 3. **"How many tokens did we remove?" is the wrong north star.** Repomix's
-   `--token-budget` *errors out* when the pack exceeds the budget; uithub truncates by
-   file size. Fitting a budget with graceful degradation is table stakes nobody ships —
-   but the real claim ("the agent still succeeds") requires an extrinsic benchmark that
-   nobody in this category publishes.
-   **Consequence:** the benchmark is a first-class subsystem (BENCHMARK.md), and every
-   public claim about ContextSlice must trace to a reproducible run.
+   `--token-budget` is a **post-hoc CI guard, not a fitter**: verified at source level
+   (`src/cli/cliTokenBudget.ts`) it throws *after* writing the over-budget pack, and its
+   own docs say "the output is still generated; only the exit code signals the
+   overflow". Repomix does have three per-file inclusion levels
+   (`output.patterns` — full / tree-sitter-compressed / directory-structure-only), but
+   they are **hand-declared globs in a config file with no CLI flag**, so the *user*
+   chooses the granularity; the budget does not. uithub truncates by file size.
+   Aider's map budget is documented as "Suggested" and accepts a ±15% error, so it can
+   exceed its own target.
+   So: nobody fits a budget by *choosing* granularity per file under a hard ceiling —
+   but the real claim ("the agent still succeeds") also requires an extrinsic benchmark,
+   which is where the category is genuinely thin (see BENCHMARK §6 for the one
+   counterexample we found). **Consequence:** the benchmark is a first-class subsystem
+   (BENCHMARK.md), and every public claim about ContextSlice must trace to a
+   reproducible run. This project publishes no claim resting on a competitor's absence:
+   the defensible statement is about what *we* measure, not about what others don't.
 
 ### 2.3 The refined thesis
 
@@ -100,10 +110,28 @@ this plan was written. Verdict: **the core idea survives, but three assumptions 
 > deterministically, fitted to a token budget, and graded by task outcomes — not another
 > packer, not another cloud index.
 
-The differentiating trio: **(a)** task-seeded selection, **(b)** budget *fitting* with
-mixed granularity (L0–L5) in one artifact, **(c)** published evaluation against gold
-contexts. Aider proved (a) partially, inside one agent; nobody ships (b); nobody in the
-category does (c).
+The differentiating trio, stated as narrowly as the evidence supports: **(a)**
+task-seeded selection, **(b)** budget *fitting* that chooses per-file granularity (L0–L5)
+under a hard never-exceed ceiling, **(c)** published evaluation against gold contexts
+with an intrinsic regression gate in CI.
+
+Honesty about each, as verified 2026-09-15:
+
+- **(a) is not unique.** Aider seeds from chat keywords; Graft's `graft ask` does
+  deterministic task-conditioned ranking with no LLM. Task-seeding is table stakes.
+- **(b) is the real differentiation, and it is narrow.** Graft ships true mixed
+  granularity (`graft skeleton` = signatures only) and a deterministic task→ranked-files
+  path, but its controls are a result **count** (`--limit`, `--max-dirs`), not a token
+  ceiling, and the level is a manual flag. Repomix has per-file levels but glob-configured
+  by hand. Aider mixes full source and skeletons but splits them by *chat membership*, not
+  by budget, and its budget is soft. Nobody we could verify makes the budget itself
+  decide each file's level.
+- **(c) is thinner than we assumed.** Graft publishes SWE-bench Verified results
+  (official `swebench` grader, n=50), so "nobody publishes agent outcomes" is false. But
+  it removed its harness from the public repo (CHANGELOG v0.7.0), and n=50 detects a
+  12-point effect only ~27% of the time by the paired McNemar power calculation — so
+  *reproducible and adequately powered* remains unclaimed. That is the standard we hold
+  ourselves to in BENCHMARK.md, and it is a harder bar than "nobody does it".
 
 ---
 
@@ -159,10 +187,11 @@ category does (c).
 | code2prompt | 7.7k | TUI packer, Handlebars templates, git context | No | Entity-map option (nav aid) | No | No | No | Yes | cargo / brew / pip |
 | files-to-prompt | 2.8k | Minimal `cat` of files | No | No | No | No | No | Yes | pip |
 | uithub | small | URL→text service | Size-ordered truncation | No | No | No | No | No (service) | none |
-| Aider repo map | 49k | In-agent repo map: tags → graph → PageRank → 1k-token symbol tree | Yes (chat-keyword seeded) | tree-sitter | File graph | No | No | Yes | pip (inside aider) |
+| Aider repo map | 49k | In-agent repo map: tags → graph → PageRank → signatures-only tree (1024–4096 tokens, soft target) | Yes (chat-keyword seeded) | tree-sitter | File graph | No | No | Yes | pip (inside aider) |
 | Serena | 29.3k | MCP symbol tools over LSP; memories | None (on-demand tools) | LSP | No | No | No | Yes | uvx |
 | claude-context | 12.5k | MCP hybrid BM25+dense chunk search | Retrieval, not assembly | Chunking only | No | Yes (provider) | No | Partial (needs provider) | npx + vector DB |
 | Cursor | — | Editor with server-side embedding index + grep | Proprietary | Chunking | No | Yes | No | No (cloud) | editor |
+| Graft | 8.0k | Graph CLI/MCP: task → ranked nodes + `file:line`; `skeleton` = signatures only; publishes SWE-bench Verified | Yes (`graft ask`, deterministic) | tree-sitter | Symbol graph | No | Optional (`--deep`) | Yes | npm |
 | ContextSlice | — | Task → budget-fitted mixed-granularity slice; persistent index; CLI+MCP | Yes (task-seeded, deterministic) | tree-sitter | File + approx. symbol graph | No (later, optional) | No (later, optional) | Yes | cargo / brew / npx wrapper |
 
 Detailed per-tool analysis is in §2.1 and the research notes embedded in ALGORITHM.md §15
@@ -494,9 +523,10 @@ holds. Steps 1–9 are Phase 0+1, steps 10–15 are Phase 2.
 | 012 | Owned `.scm` queries; no tags crate, no aider queries as a drop-in | tags predicates are silently ignored by core tree-sitter — measured |
 | 013 | MCP revision + transport (**Proposed**, decided at Phase 2 step 14) | Current revision removed the handshake; `rmcp` needs tokio for stdio |
 | 014 | tiktoken-rs with embedded tables | Budget estimation and measurement must share one code path, offline |
-| 015 | Reconnaissance findings rejected, with reasons and reopen triggers | Rejected findings must stay rejected on the record |
+| 015 | Competitive landscape verified; three claims corrected | Verified against competitors' source; budget-fitting is a narrower moat than assumed |
+| 016 | Reconnaissance findings rejected, with reasons and reopen triggers | Rejected findings must stay rejected on the record |
 
 Full records live in [`docs/adr/`](adr/) — see the [ADR index](adr/README.md). ADR-011
-through ADR-015 were produced by the bootstrap verification pass: they record what was
+through ADR-016 were produced by the bootstrap verification pass: they record what was
 checked against upstream reality, what the check changed, and what would reopen each
 decision.

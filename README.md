@@ -55,6 +55,18 @@ intrinsic (gold-context recall and precision per token) and extrinsic (agent tas
 per token and cost). No public claim ships without a run behind it, and the benchmark's
 negative-results section is mandatory.
 
+**What is not unique, stated plainly.** Task-conditioned selection is table stakes:
+Aider seeds from chat keywords, and Graft's `graft ask` does deterministic
+task-conditioned ranking with no LLM. Graft also ships signatures-only output
+(`graft skeleton`), and Repomix offers per-file inclusion levels. Mixed granularity as a
+*capability* is therefore not the differentiator.
+
+What we could not find anywhere is the **conjunction**: the token budget itself deciding
+each file's level, under a hard never-exceed ceiling. Graft's controls are a result
+*count* (`--limit`, `--max-dirs`) and its level is a manual flag; Repomix's levels are
+hand-declared globs with no CLI flag; Aider's split is decided by chat membership and its
+budget is soft. That is the whole claim, and ADR-015 records how it was verified.
+
 There is **no patent moat here**. The defensive position is execution quality,
 adapter depth, and accumulated evaluation data.
 
@@ -115,7 +127,7 @@ The full design is in [`docs/`](docs/):
 
 ### Decisions already made and recorded
 
-Fifteen ADRs exist before the first feature, because several were forced by facts that
+Sixteen ADRs exist before the first feature, because several were forced by facts that
 contradicted the original plan. The interesting ones:
 
 - **ADR-012 — we write our own tree-sitter queries.** Aider's tag queries were the
@@ -132,6 +144,14 @@ contradicted the original plan. The interesting ones:
   `<string>value` assertions. The grammar is chosen per extension, and a test pins it.
 - **ADR-014 — `tiktoken-rs` with embedded tables**, so budget estimation and final
   measurement share one code path and stay offline.
+- **ADR-015 — three competitive claims in our own founding documents were wrong.** The
+  claims were checked against competitors' source rather than their documentation, and
+  two of them disagreed: Aider's repo map is 1024–4096 tokens (not "~1k") with a *soft,
+  ±15%* budget and granularity chosen by chat membership, and Graft already ships
+  deterministic task-conditioned selection and signatures-only output. Graft also
+  publishes SWE-bench Verified results, so "nobody publishes agent outcomes" is false.
+  The defensible claim is now narrower — the *budget* choosing each file's level under a
+  hard ceiling — and **claims of absence are forbidden** in any public artifact.
 
 ---
 

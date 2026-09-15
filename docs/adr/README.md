@@ -26,7 +26,8 @@ intact.
 | [012](ADR-012-own-tree-sitter-queries.md) | Own `.scm` queries; reject the tags crate and aider's queries as a drop-in | Accepted | Bootstrap |
 | [013](ADR-013-mcp-protocol-revision-and-transport.md) | MCP target revision and transport (rmcp vs hand-rolled) | **Proposed** | Phase 2 step 14 |
 | [014](ADR-014-tokenizer-choice.md) | tiktoken-rs for budget measurement | Accepted | Bootstrap |
-| [015](ADR-015-rejected-reconnaissance-findings.md) | Reconnaissance findings rejected, and why | Accepted | Bootstrap |
+| [015](ADR-015-competitive-landscape-verification.md) | Competitive landscape verified; three claims corrected | Accepted | Bootstrap |
+| [016](ADR-016-rejected-reconnaissance-findings.md) | Reconnaissance findings rejected, and why | Accepted | Bootstrap |
 
 ## How these were verified
 
@@ -36,7 +37,13 @@ accepted because an agent reported it. Each was checked against current reposito
 upstream activity, licensing, compatibility with this workspace, and whether it actually
 reduced work without creating architectural debt. The verification method and its result
 are recorded in each ADR, and the findings that did **not** survive are recorded in
-[ADR-015](ADR-015-rejected-reconnaissance-findings.md) rather than quietly dropped.
+[ADR-016](ADR-016-rejected-reconnaissance-findings.md) rather than quietly dropped.
+
+Competitive claims were verified separately and against the competitors' own source, not
+their documentation, because for two of them the two disagreed. Three claims did not
+survive and are corrected in [ADR-015](ADR-015-competitive-landscape-verification.md).
+That record also introduces the rule now enforced in BENCHMARK.md §7: **claims of absence
+are forbidden** — we may not write "nobody does X" in any public artifact.
 
 Where a claim could be tested cheaply, it was tested rather than looked up. Three
 decisions in this set (ADR-012, ADR-014 and the grammar split described in ADR-012) rest
