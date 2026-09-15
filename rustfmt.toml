@@ -1,0 +1,6 @@
+# Defaults, stated explicitly so a contributor's local rustfmt cannot silently
+# reformat the tree differently from CI.
+edition = "2021"
+max_width = 100
+use_field_init_shorthand = true
+newline_style = "Unix"

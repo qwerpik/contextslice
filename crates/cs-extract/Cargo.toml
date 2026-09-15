@@ -1,0 +1,25 @@
+[package]
+name = "cs-extract"
+description = "tree-sitter parsing and .scm query extraction into symbols, refs, imports (ARCHITECTURE 4.2)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cs-scanner.workspace = true
+tree-sitter.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-python.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+serde_json.workspace = true

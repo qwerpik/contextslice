@@ -1,0 +1,188 @@
+# ContextSlice — Benchmark Methodology
+
+| | |
+|---|---|
+| **Status** | Pre-implementation specification |
+| **Version** | 1.0 — 2026-09-14 |
+| **Principle** | No public claim without a reproducible run behind it. |
+
+ContextSlice's differentiation is *proven* context selection. This document defines how
+proof is manufactured: a two-tier benchmark — **intrinsic** (fast, CI-integrated,
+measures selection quality directly) and **extrinsic** (slower, nightly, measures what
+actually matters: agent task success per token/cost/latency).
+
+---
+
+## 1. Philosophy
+
+1. **The product metric is task success at acceptable cost**, not tokens removed. Token
+   counts are only interesting relative to success.
+2. **Reproducibility or it didn't happen.** Harness, corpus manifests, seeds, raw logs,
+   and the ContextSlice version are published with every report.
+3. **Baselines must be strong and honest.** We compare against full-repo context,
+   Repomix (the category leader), and a naive dependency-crawl — not against strawmen.
+4. **Non-claims are stated.** Corpus limitations, agent variance, single-model results.
+5. **The benchmark tunes the algorithm** (ALGORITHM §13). Weights move only with a
+   benchmark delta attached.
+
+## 2. Two-tier design
+
+| | Intrinsic | Extrinsic |
+|---|---|---|
+| Question | "Did we select the right files?" | "Does the agent succeed better/cheaper?" |
+| Unit | One merged PR (issue text + gold files) | One issue with runnable tests |
+| Runtime | Seconds per task; whole corpus in CI minutes | Minutes per task; nightly job |
+| Metrics | recall@budget, precision, tokens | fail-to-pass rate, input/output tokens, cost, wall time, turns |
+| Used for | Regression gate, weight tuning | Publication, roadmap gates |
+
+Both tiers share a corpus governance process (§8).
+
+---
+
+## 3. Intrinsic benchmark (specification)
+
+### 3.1 Corpus construction
+
+1. **Select repositories** (criteria, not vibes): 1k–50k stars; active; real test suite;
+   issues linked to merged PRs; per-language: one small (<2k files), one medium
+   (2k–20k), one large (>20k). v0.1 targets: Go ×3, TypeScript ×2, Python ×2 (≥200 PRs
+   total; ContextBench's 66-reach is a Phase 6 ambition, not a v0.1 requirement).
+2. **Pin** every repo by commit SHA (the merge commit's parent).
+3. **Extract tasks:** task text = linked issue title+body if the PR closes an issue,
+   else PR title+body. Keep code blocks and stack traces — that is realistic input.
+4. **Gold context** = the set of files touched by the merge commit, partitioned into
+   `gold.code` (production files), `gold.test` (test files), `gold.config`.
+5. **Exclusions:** PRs touching >25 files (refactors/mechanical sweeps — gold sets too
+   diffuse to be meaningful); PRs with no issue text and <20-char bodies; dependency
+   bumps; PRs whose gold set is entirely vendored/generated paths.
+6. **Dedup** near-identical tasks (same repo, Jaccard >0.8 on gold sets).
+
+### 3.2 Variants under test
+
+| ID | Variant | Construction |
+|---|---|---|
+| A | **Full-repo-truncated** | whole repo at L5, alphabetical by path, hard-truncated at budget |
+| B | **Repomix pack** | `repomix --style xml` with default patterns, truncated at budget (Repomix errors past its own budget; we truncate downstream to keep the comparison budget-aligned) |
+| C | **Naive dependency crawl** | BM25 top-k seeds, 1-hop import expansion, all files L5 until budget — the "obvious" version of our idea, our most important baseline |
+| D | **ContextSlice (deterministic)** | the product, default settings, budget-fitted |
+| E | ContextSlice `--semantic` | Phase 5 only, off by default |
+
+All variants receive **identical** budget (primary points: 8k and 16k), identical
+tokenization for measurement (tiktoken o200k), and identical repo snapshots.
+
+### 3.3 Metrics
+
+For each (task, variant, budget):
+
+- **Recall@budget** — primary, two grades:
+  - `recall_strong` = |gold.code ∪ gold.test included at ≥ L4| / |gold ∪ gold.test|
+  - `recall_weak` = |gold at ≥ L2| / |gold| (declaration-level visibility counts as
+    "found")
+- **Precision** = tokens spent on gold files (and 1-hop neighbors of gold, since
+  supporting context is legitimately useful) ÷ total slice tokens. Reported alongside
+  recall because ContextBench found agents over-favor recall; we optimize the frontier,
+  not recall alone.
+- **Tokens used** (variants that fit budget will differ in fill efficiency).
+- **Test recall** reported separately (`gold.test` inclusion) — the test-promotion rule
+  (ALGORITHM §7) is validated here.
+
+### 3.4 Statistics & reporting
+
+Per corpus cell (repo × language × budget): median recall/precision, bootstrap 95% CIs
+(2,000 resamples), and **paired per-task deltas** (D vs C, D vs A — same tasks,
+McNemar-style sign test on "recall_strong ≥ 0.8" hit/miss, Wilcoxon signed-rank on
+token counts). Reports include per-task CSVs; failures are listed, not hidden.
+
+### 3.5 CI integration
+
+- Curated 40-task subset (10 per language MVP) runs on every PR touching `cs-select`,
+  `cs-extract`, `cs-resolve`, or any `tuning` constant.
+- **Gate:** `recall_strong@8k` median drop > 2 points ⇒ CI fails.
+- Full corpus runs nightly; results posted to `docs/benchmarks/` per release.
+
+### 3.6 Publication gate (the claim we must earn)
+
+Before any public comparison claim: ContextSlice (D) must beat naive crawl (C) on
+recall@same-tokens **and** beat full-repo (A) on tokens@comparable-recall, both with
+CIs excluding zero, on ≥3 repos. If D fails vs C, the algorithm iterates (that is the
+point of the harness) — this is a *pre-marketing* gate, not a post-launch apology.
+
+---
+
+## 4. Extrinsic benchmark (specification)
+
+### 4.1 Harness
+
+- **Agent scaffold:** a minimal fixed loop (mini-SWE-agent style, ≤40 turns): model
+  receives task + variant context, may call `read_file`, `grep`, `edit`, `run_tests`
+  (via a sandboxed shell), then submits. Deliberately simple and fully published.
+- **Model:** one pinned frontier model via API, temperature 0, fixed system prompt
+  across variants. Model/version recorded; results are explicitly *about this
+  configuration*.
+- **Context variants:** A/B/C/D from §3.2 injected as the initial context. The agent's
+  tools remain identical across variants — we measure the *starting context* effect,
+  not tool differences.
+
+### 4.2 Tasks
+
+- ~50 tasks: Python subset drawn SWE-bench-lite-style (repos within our adapter set),
+  plus curated Go/TS tasks from corpus repos (issue text + failing test reproduced at
+  the parent commit; inclusion requires the test to fail pre- and pass post-merge —
+  same standard as SWE-bench's fail-to-pass).
+- Sample size honesty: 50 tasks detects large effects (≥15-point success-rate gaps);
+  we report CIs and avoid claiming small-effect victories.
+
+### 4.3 Metrics
+
+Per (task, variant): **resolved** (fail-to-pass tests pass; pass-to-pass not
+regressed), input tokens, output tokens, turns, wall time, API cost. Aggregates:
+resolution rate with bootstrap CI; paired McNemar D vs A/B/C; median cost-per-resolved-
+task (cost ÷ expected resolutions — the honest efficiency frontier number).
+
+### 4.4 Reporting
+
+Nightly runs publish: harness commit, model id, prompts, per-task logs, aggregate
+tables, and a **negative-results section** (where ContextSlice hurt: tasks whose gold
+context our graph missed, tasks where full-repo won because the model needed breadth).
+The negative-results section is mandatory — it is also our tuning signal.
+
+---
+
+## 5. Statistical rules (both tiers)
+
+1. Paired designs everywhere (same task across variants); never compare across
+   different task samples.
+2. Bootstrap CIs (2,000 resamples) for rates and medians; McNemar / Wilcoxon for
+   paired significance; α = 0.05, effects reported with CIs not bare p-values.
+3. Multiple-comparison awareness: primary metric declared in advance
+   (recall_strong@8k intrinsic; resolution rate extrinsic); everything else is
+   secondary and labeled exploratory.
+4. No cherry-picking: corpus construction rules are committed before extraction runs;
+   exclusions must be rule-based (§3.1.5) and applied uniformly to all variants.
+
+## 6. Relation to existing benchmarks
+
+| Benchmark | What it is | How we relate |
+|---|---|---|
+| **ContextBench** (arXiv 2602.05892) | 1,136 tasks, 66 repos, 8 languages, human-annotated gold contexts; recall/precision/efficiency on *explored vs utilized* context | Our intrinsic metrics align deliberately (recall/precision/efficiency framing); cross-evaluating ContextSlice on their public gold contexts is a Phase 6 goal — third-party gold sets are the strongest credibility signal |
+| **SWE-ContextBench** (arXiv 2602.08316) | 1,100 + 376 tasks measuring resolution/runtime/token cost under context-reuse strategies | Validates our thesis (well-selected context helps, unfiltered hurts); our extrinsic tier adapts its cost-accounting |
+| **SWE-bench (Verified/Lite)** | Issue → patch, fail-to-pass judging | Source of Python extrinsic tasks; we do not claim SWE-bench leaderboard comparability (different scaffold) |
+| **Aider polyglot** | 225 Exercism exercises, edit-format focused | Not used: exercises are self-contained single files — context selection is untested by construction |
+| **Terminal-bench** | Docker terminal tasks | Out of scope; no repo-context manipulation |
+
+## 7. Claims policy
+
+Allowed claims (with linked runs): "on our published corpus, ContextSlice selected
+gold files with median recall X at Y tokens vs Z for naive crawl". Forbidden claims:
+"2× better context", universal token-reduction percentages, implications about
+arbitrary agents/models. Every README number links to `docs/benchmarks/<version>/`.
+
+## 8. Corpus governance
+
+- Repos pinned by SHA; manifests record repo, SHA, PR id, issue id, task text hash,
+  gold file list. Regeneration is a single `cs-bench corpus rebuild` command.
+- Licensing: corpus repos remain under their own licenses; we ship *manifests and task
+  metadata*, never repo snapshots; regeneration fetches from upstream at pinned SHAs.
+- Leakage guard: ContextSlice development may not special-case corpus repos; tuning
+  constants must be justified by aggregate deltas, not per-repo fixes. A held-out repo
+  (touched only at release time) checks for overfitting starting in Phase 3.

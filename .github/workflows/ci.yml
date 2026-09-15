@@ -1,0 +1,155 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# CI is the only thing standing between "it compiles" and the quality bar in
+# MASTER_PLAN.md §8.1. Every job here maps to a stated contract in docs/;
+# nothing is included "because CI usually has it".
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: Clippy (-D warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is first-class from Phase 1 (MASTER_PLAN.md §8.1): paths,
+        # encoding and file locking must be exercised, not assumed.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Determinism (ALGORITHM.md §12) requires identical bytes across
+      # platforms, so the suite runs on all three, not just Linux.
+      - run: cargo test --workspace --all-targets
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Read the declared MSRV from the manifest
+        id: msrv
+        run: |
+          # Read rust-version rather than hard-coding it, so the job cannot
+          # drift from the promise in Cargo.toml (ADR-001). A hard-coded 1.88
+          # here was wrong the first time it was written: tree-sitter 0.27
+          # requires 1.90, and only running the check on the declared toolchain
+          # revealed it.
+          version=$(grep -m1 '^rust-version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          echo "Declared MSRV: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      # rust-version in Cargo.toml is a promise; this job is what makes it true.
+      - run: cargo check --workspace --all-targets
+
+  docs:
+    name: Docs build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --workspace --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  deny:
+    name: Licenses & advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
+  no-network:
+    name: Zero-network assertion
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Assert no HTTP/socket stack is linked
+        run: |
+          # SECURITY.md §3 promises the core never opens a socket. Until the
+          # strace-based runtime test exists (Phase 1), enforce the property
+          # structurally: no networking crate may enter the dependency tree.
+          # 'cargo tree' sees optional deps that a given feature set does not
+          # build, so this fails loudly rather than silently widening the
+          # supply-chain and capability surface.
+          if cargo tree --workspace --all-features \
+              | grep -E '(^|[ /])(reqwest|hyper|mio|socket2|tokio|ureq|curl|openssl)( |$|/)'; then
+            echo "::error::A networking/async-runtime dependency entered the tree."
+            echo "The core must remain synchronous and socket-free (SECURITY.md §3)."
+            exit 1
+          fi
+          echo "No networking dependency present."
+
+  docs-drift:
+    name: Docs consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Assert the manifest is the single source of dependency versions
+        run: |
+          # ADR-011 §5. Two documents asserting versions independently is exactly
+          # how the rmcp mismatch happened, so this checks that every version
+          # quoted in ARCHITECTURE.md §14 also appears in Cargo.toml.
+          #
+          # It checks membership, not equality: the manifest legitimately holds
+          # versions the document does not mention. Only a version the document
+          # claims but the manifest lacks is a drift signal.
+          docs_versions=$(grep -oE '\b[0-9]+\.[0-9]+\.[0-9]+\b' docs/ARCHITECTURE.md | sort -u)
+          if [ -z "$docs_versions" ]; then
+            echo "ARCHITECTURE.md quotes no dependency versions — nothing to check."
+            exit 0
+          fi
+          failed=0
+          for v in $docs_versions; do
+            if grep -qF "$v" Cargo.toml; then
+              echo "ok      ARCHITECTURE.md version $v is in Cargo.toml"
+            else
+              echo "::error::ARCHITECTURE.md quotes version $v which is absent from Cargo.toml"
+              echo "         Dependency versions belong in the manifest (ADR-011 §5)."
+              failed=1
+            fi
+          done
+          exit $failed

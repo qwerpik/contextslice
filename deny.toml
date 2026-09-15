@@ -1,0 +1,56 @@
+# cargo-deny configuration (SECURITY.md §10, MASTER_PLAN.md §8.1).
+#
+# CI runs this on every PR. The allow-list is not "permissive licenses in
+# general" — it is the exact set ADR-007 verified for this dependency tree, so
+# a new copyleft or unlisted dependency fails the build and forces a decision
+# rather than being absorbed silently.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+# Do not ignore advisories wholesale; an ignore entry must name the advisory and
+# carry a comment explaining the mitigation. Empty by default.
+ignore = []
+
+[licenses]
+version = 2
+# Confidence threshold for license detection; the crates we depend on all ship
+# explicit SPDX metadata, so a low-confidence match is a real signal.
+confidence-threshold = 0.93
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "Unicode-3.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "CC0-1.0",
+    "Unlicense",
+]
+# The published artifact is a binary, but we also ship crates to crates.io, so
+# both are considered.
+private = { ignore = true }
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+deny = [
+    # Added deliberately as a tripwire for ADR-010 / SECURITY.md §3: if any of
+    # these ever enters the tree, the zero-network claim needs re-examination
+    # and a superseding ADR, not a quiet exception here.
+    { name = "reqwest" },
+    { name = "hyper" },
+    { name = "ureq" },
+    { name = "curl" },
+    { name = "openssl" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -1,0 +1,52 @@
+name: Bench
+
+# The intrinsic benchmark is a regression gate (BENCHMARK.md §3.5), not a
+# vanity dashboard. It is separate from ci.yml because it needs the corpus
+# checked out and takes far longer than a normal PR cycle, so it runs nightly
+# and on demand rather than blocking every push.
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      budget:
+        description: "Token budget for the regression gate"
+        required: false
+        default: "8000"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  intrinsic:
+    name: Intrinsic benchmark
+    runs-on: ubuntu-latest
+    # Phase 0-1: the harness and corpus are not implemented yet, so this job
+    # must not report green on work that has not happened. It stays disabled
+    # until docs/BENCHMARK.md §3 is implemented (MASTER_PLAN.md §15 step 13),
+    # at which point this condition is deleted.
+    if: ${{ vars.BENCH_ENABLED == 'true' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --workspace
+      - name: Run intrinsic corpus
+        run: |
+          cargo run --release -p cs-bench -- \
+            --budget "${{ github.event.inputs.budget || '8000' }}"
+      - name: Recall regression gate
+        run: |
+          # BENCHMARK.md §3.5: a median drop greater than 2 points in
+          # recall_strong@8k fails the run. Implemented together with the
+          # harness in step 13; until then the gate has nothing to compare.
+          echo "Regression gate pending cs-bench implementation (MASTER_PLAN §15 step 13)."
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: intrinsic-benchmark-report
+          path: docs/benchmarks/
+          if-no-files-found: ignore
+          retention-days: 90

@@ -1,0 +1,67 @@
+# Clippy configuration (workspace-wide).
+#
+# `pedantic` is enabled in Cargo.toml. Everything silenced here is silenced for a
+# stated reason, not to make the build green.
+
+# Project document names appear hundreds of times in doc comments as plain prose
+# ("see ARCHITECTURE §4.2"). They are proper nouns of this repository, not code
+# identifiers, so backticking every occurrence would hurt readability.
+doc-valid-idents = [
+    "ContextSlice",
+    "MASTER_PLAN",
+    "ARCHITECTURE",
+    "ALGORITHM",
+    "BENCHMARK",
+    "SECURITY",
+    "LANGUAGES",
+    "LanguageAdapter",
+    "EdgeProvider",
+    "SlicePlan",
+    "ScannedFile",
+    "ExtractedFile",
+    "IndexMode",
+    "tree-sitter",
+    "tree-sitter-language",
+    "rusqlite",
+    "blake3",
+    "rayon",
+    "clap",
+    "tokio",
+    "rmcp",
+    "git2",
+    "libgit2",
+    "tiktoken",
+    "tiktoken-rs",
+    "o200k",
+    "SQLite",
+    "FTS5",
+    "WAL",
+    "CSR",
+    "BM25",
+    "SCIP",
+    "LSP",
+    "MCP",
+    "JSON-RPC",
+    "Repomix",
+    "Aider",
+    "Serena",
+    "ContextBench",
+    "SWE-bench",
+    "PageRank",
+    "CommonJS",
+    "JSX",
+    "TypeScript",
+    "JavaScript",
+    "TSX",
+    "stack-graphs",
+    "MASTER_PLAN.md",
+    "GitHub",
+    "MiB",
+    "KiB",
+    "GiB",
+]
+
+# The scanner and selection pipeline are staged algorithms whose phases read
+# better together than split across helpers; the default 100-line ceiling forces
+# fragmentation that obscures the ordering contract (ARCHITECTURE §7).
+too-many-lines-threshold = 130

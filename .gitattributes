@@ -1,0 +1,16 @@
+# Determinism is a product invariant (ALGORITHM.md §12) and CI compares golden
+# output across Linux, macOS and Windows. Text checked out with CRLF on Windows
+# would change extracted source spans and therefore rendered bytes, so line
+# endings are normalized in the repository rather than left to each machine's
+# core.autocrlf setting.
+* text=auto eol=lf
+
+# Fixtures are inputs to golden tests: their bytes are part of the expectation,
+# so they must never be rewritten by any checkout-time conversion.
+fixtures/** -text
+*.scm text eol=lf
+
+# Binary artifacts that must not be normalized.
+*.png binary
+*.ico binary
+*.pdf binary

@@ -1,0 +1,17 @@
+# Rust build output
+/target
+
+# The index is per-repository local state, never committed (SECURITY.md §7).
+# It also holds absolute paths and file metadata that are meaningless to others.
+.contextslice/
+
+# Benchmarks write corpus manifests and result sets; logs and raw runs are not
+# source. Manifests that a report cites are committed deliberately, by hand.
+bench/results/
+bench/corpus/cache/
+
+# Editor/OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/

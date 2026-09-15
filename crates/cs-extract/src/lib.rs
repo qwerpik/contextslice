@@ -1,0 +1,392 @@
+//! tree-sitter parsing and `.scm` query extraction into definitions, references
+//! and imports.
+//!
+//! Implements `cs-extract` from ARCHITECTURE.md §4.2.
+//!
+//! # Owned queries, not the tags crate
+//!
+//! Queries are owned `.scm` sources compiled against the grammar by this crate.
+//! The upstream `tree-sitter-tags` crate is deliberately not used: its tags
+//! convention depends on `#strip!` / `#set-adjacent!` predicates that the core
+//! Rust binding does **not** implement (it handles only `eq?`, `not-eq?`,
+//! `any-eq?`, `match?`, `not-match?`, `any-match?`, `is?`, `is-not?`,
+//! `any-of?`, `not-any-of?`). Core parsing accepts unknown predicates without
+//! error and then ignores them, so a tags-style query compiles cleanly and
+//! silently produces un-stripped, non-adjacent captures — a failure mode that
+//! reports no diagnostic. See `docs/adr/ADR-012`.
+//!
+//! # Grammar pinning
+//!
+//! Grammars are pinned to exact versions and reach the runtime through the
+//! `tree-sitter-language` ABI crate (LANGUAGES.md §9), which decouples grammar
+//! releases from `tree-sitter` releases. The `grammars_load_and_parse` test
+//! asserts the pinned set actually loads and parses, so an ABI mismatch fails
+//! the build instead of failing at a user's first run.
+
+#![forbid(unsafe_code)]
+
+use cs_scanner::Language;
+use serde::{Deserialize, Serialize};
+
+/// Per-file parse timeout in milliseconds (ARCHITECTURE §4.2, SECURITY.md §6).
+///
+/// tree-sitter's Rust binding parses synchronously and exposes no timeout
+/// parameter, so this constant documents the budget the index stage enforces
+/// *around* the parse call rather than a knob this crate can honour internally.
+pub const PARSE_TIMEOUT_MS: u64 = 250;
+
+/// Files at or below this size are parsed at all (ARCHITECTURE §4.1).
+pub const PARSE_SIZE_CAP: u64 = 1024 * 1024;
+
+/// A span of source. Lines are 1-based for display (`path:line` anchors,
+/// ARCHITECTURE §9); byte offsets are 0-based into the file's bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Span {
+    /// First line of the construct, 1-based.
+    pub start_line: u32,
+    /// Last line of the construct, 1-based and inclusive.
+    pub end_line: u32,
+    /// Byte offset of the first byte.
+    pub start_byte: u32,
+    /// Byte offset one past the last byte.
+    pub end_byte: u32,
+}
+
+/// Canonical symbol kind (ARCHITECTURE §5, `symbols.kind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DefKind {
+    /// A free function.
+    Function,
+    /// A method bound to a receiver or class.
+    Method,
+    /// A class.
+    Class,
+    /// A struct or record type.
+    Struct,
+    /// An interface, trait, or protocol.
+    Interface,
+    /// A type alias or named type.
+    Type,
+    /// A named constant.
+    Const,
+    /// A variable binding.
+    Var,
+    /// An enumeration.
+    Enum,
+    /// A module or package declaration.
+    Module,
+}
+
+impl DefKind {
+    /// Stable string used as the `symbols.kind` column value and in rendering.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Function => "func",
+            Self::Method => "method",
+            Self::Class => "class",
+            Self::Struct => "struct",
+            Self::Interface => "interface",
+            Self::Type => "type",
+            Self::Const => "const",
+            Self::Var => "var",
+            Self::Enum => "enum",
+            Self::Module => "module",
+        }
+    }
+}
+
+/// How completely a file was analyzed.
+///
+/// Extraction never fails a run: an unparseable file is *labeled*, and the label
+/// travels into `files.parse_status` and the slice header (ARCHITECTURE §11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParseStatus {
+    /// Parsed with no error nodes.
+    Ok,
+    /// Parsed, but the tree contains error or missing nodes; extraction kept
+    /// whatever resolved.
+    Partial,
+    /// Not parsed: no adapter for the language, or the file exceeded
+    /// [`PARSE_SIZE_CAP`].
+    Skipped,
+    /// Explicitly excluded from parsing.
+    Unsupported,
+}
+
+/// A definition found in a file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Def {
+    /// Bare name as written in source (`Login`).
+    pub name: String,
+    /// Module-qualified name (`internal/auth.Login`).
+    pub qual_name: String,
+    /// Canonical kind.
+    pub kind: DefKind,
+    /// Source span.
+    pub span: Span,
+    /// Enclosing symbol's qualified name, when nested (a method in a class).
+    pub container: Option<String>,
+    /// One-line signature for L2/L3 rendering.
+    pub signature: Option<String>,
+    /// First doc-comment paragraph, or `None`.
+    pub doc: Option<String>,
+}
+
+/// A reference to a name from inside a file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ref {
+    /// Referenced name as written.
+    pub name: String,
+    /// Source span.
+    pub span: Span,
+    /// Enclosing symbol's qualified name, when the reference sits inside one.
+    pub container: Option<String>,
+}
+
+/// How an import was written; affects graph weight (LANGUAGES.md §6.2: dynamic
+/// imports are weaker evidence than static ones).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportKind {
+    /// A static import (Go `import`, Python `import`, TS `import ... from`).
+    Import,
+    /// A re-export (`export * from`, `__init__.py` re-export).
+    ExportFrom,
+    /// A CommonJS `require()`.
+    Require,
+    /// A dynamic `import()` or `importlib` call.
+    Dynamic,
+}
+
+/// An import or export-from statement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Import {
+    /// The specifier exactly as written (`./util`, `example.com/m/internal/auth`).
+    pub raw: String,
+    /// Statement kind.
+    pub kind: ImportKind,
+    /// Source span.
+    pub span: Span,
+}
+
+/// Everything extraction learned about one file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtractedFile {
+    /// Definitions, in source order.
+    pub defs: Vec<Def>,
+    /// References, in source order.
+    pub refs: Vec<Ref>,
+    /// Imports, in source order.
+    pub imports: Vec<Import>,
+    /// How completely the file was analyzed.
+    pub status: ParseStatus,
+}
+
+impl ExtractedFile {
+    /// An empty result for a file that was deliberately not parsed.
+    #[must_use]
+    pub const fn skipped(status: ParseStatus) -> Self {
+        Self {
+            defs: Vec::new(),
+            refs: Vec::new(),
+            imports: Vec::new(),
+            status,
+        }
+    }
+}
+
+/// Extraction failures.
+///
+/// Malformed source is *not* an error — it yields [`ParseStatus::Partial`]. Only
+/// conditions that make extraction impossible reach this type.
+#[derive(Debug, thiserror::Error)]
+pub enum ExtractError {
+    /// The grammar could not be installed into a parser. This indicates an ABI
+    /// mismatch between a pinned grammar and the `tree-sitter` runtime, which is
+    /// a build defect rather than a user error.
+    #[error("grammar for language '{lang}' is incompatible with this tree-sitter runtime")]
+    IncompatibleGrammar {
+        /// The language whose grammar failed to load.
+        lang: &'static str,
+    },
+    /// tree-sitter returned no tree.
+    #[error("tree-sitter produced no syntax tree for this file")]
+    NoTree,
+}
+
+/// The tree-sitter grammar for a language, as a runtime [`tree_sitter::Language`].
+///
+/// Returns `None` for languages without an adapter, which callers handle by
+/// taking the heuristic path (LANGUAGES.md §7).
+///
+/// # Why the TypeScript family needs two grammars
+///
+/// The TypeScript and TSX grammars are not interchangeable, and neither is a
+/// superset — this was measured, not assumed:
+///
+/// | Grammar | plain JS | JSX | `.ts` | angle-bracket assertion |
+/// |---|---|---|---|---|
+/// | `LANGUAGE_TYPESCRIPT` | ok | **error** | ok | ok |
+/// | `LANGUAGE_TSX` | ok | ok | ok | **error** |
+///
+/// `LANGUAGE_TYPESCRIPT` cannot parse JSX at all, and `LANGUAGE_TSX` cannot
+/// parse `<string>value` assertions (the `<` reads as JSX). Because the scanner
+/// records `.tsx` and `.js`/`.jsx` as distinct [`Language`] values, the correct
+/// grammar is chosen by extension — the same split LANGUAGES.md §6.2 describes.
+///
+/// A file whose *actual* content disagrees with its extension (a `.ts` file
+/// containing JSX) is not guessed at: it parses partially and is labeled
+/// [`ParseStatus::Partial`].
+#[must_use]
+pub fn grammar_for(language: Language) -> Option<tree_sitter::Language> {
+    match language {
+        Language::Go => Some(tree_sitter_go::LANGUAGE.into()),
+        Language::TypeScript => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        // `.tsx` and `.jsx` both map here; both may contain JSX.
+        Language::Tsx | Language::JavaScript => Some(tree_sitter_typescript::LANGUAGE_TSX.into()),
+        Language::Python => Some(tree_sitter_python::LANGUAGE.into()),
+        Language::Unsupported | Language::Unknown => None,
+    }
+}
+
+/// Parse `source` as `language` and report how complete the result is.
+///
+/// This is the first half of extraction: it produces the syntax tree and an
+/// honest [`ParseStatus`]. Query-driven definition/reference/import extraction
+/// (`@def.name`, `@ref.name`, `@import.module` — ARCHITECTURE §4.2) layers on top
+/// of this in MASTER_PLAN §15 step 3.
+///
+/// # Errors
+///
+/// Returns [`ExtractError::IncompatibleGrammar`] if the language has no adapter
+/// or its pinned grammar cannot be installed, and [`ExtractError::NoTree`] if
+/// tree-sitter yields no tree.
+pub fn parse_source(
+    source: &str,
+    language: Language,
+) -> Result<(tree_sitter::Tree, ParseStatus), ExtractError> {
+    let Some(grammar) = grammar_for(language) else {
+        return Err(ExtractError::IncompatibleGrammar {
+            lang: language.as_str(),
+        });
+    };
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&grammar)
+        .map_err(|_| ExtractError::IncompatibleGrammar {
+            lang: language.as_str(),
+        })?;
+    let tree = parser.parse(source, None).ok_or(ExtractError::NoTree)?;
+    let status = if tree.root_node().has_error() {
+        ParseStatus::Partial
+    } else {
+        ParseStatus::Ok
+    };
+    Ok((tree, status))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The load-bearing ABI test: every pinned grammar must load and parse under
+    /// the pinned runtime. If a grammar bump breaks the ABI, this fails in CI
+    /// rather than at a user's first run (LANGUAGES.md §9).
+    #[test]
+    fn grammars_load_and_parse() {
+        let cases = [
+            (
+                Language::Go,
+                "package main\n\nfunc Login() error { return nil }\n",
+            ),
+            (Language::TypeScript, "export function login(): void {}\n"),
+            (Language::Tsx, "export const A = () => <div>hi</div>;\n"),
+            (Language::JavaScript, "export function login() {}\n"),
+            (Language::Python, "def login() -> None:\n    pass\n"),
+        ];
+        for (language, source) in cases {
+            let (tree, status) = parse_source(source, language)
+                .unwrap_or_else(|e| panic!("{language:?} failed to parse: {e}"));
+            assert_eq!(
+                status,
+                ParseStatus::Ok,
+                "{language:?} reported errors on valid source"
+            );
+            assert!(
+                tree.root_node().child_count() > 0,
+                "{language:?} produced an empty tree"
+            );
+        }
+    }
+
+    #[test]
+    fn jsx_parses_under_the_javascript_mapping() {
+        let (_, status) = parse_source(
+            "export const A = () => <div>hi</div>;\n",
+            Language::JavaScript,
+        )
+        .expect("parse");
+        assert_eq!(status, ParseStatus::Ok);
+    }
+
+    #[test]
+    fn tsx_and_ts_use_different_grammars_because_neither_is_a_superset() {
+        // `LANGUAGE_TYPESCRIPT` cannot parse JSX; `LANGUAGE_TSX` cannot parse
+        // angle-bracket assertions. The extension decides, and this test pins
+        // that choice so a future "simplification" to one grammar fails loudly.
+        let jsx = "export const A = () => <div>hi</div>;\n";
+        let (_, jsx_as_ts) = parse_source(jsx, Language::TypeScript).expect("parses, with errors");
+        assert_eq!(
+            jsx_as_ts,
+            ParseStatus::Partial,
+            "a .ts mapping must not silently claim JSX parsed cleanly"
+        );
+        let (_, jsx_as_tsx) = parse_source(jsx, Language::Tsx).expect("parse");
+        assert_eq!(jsx_as_tsx, ParseStatus::Ok);
+
+        let assertion = "const x = <string>someValue;\n";
+        let (_, assertion_as_tsx) = parse_source(assertion, Language::Tsx).expect("parse");
+        assert_eq!(
+            assertion_as_tsx,
+            ParseStatus::Partial,
+            "TSX grammar must fail on angle-bracket assertions"
+        );
+        let (_, assertion_as_ts) = parse_source(assertion, Language::TypeScript).expect("parse");
+        assert_eq!(assertion_as_ts, ParseStatus::Ok);
+    }
+
+    #[test]
+    fn malformed_source_is_partial_not_an_error() {
+        let (_, status) =
+            parse_source("func ( { ] broken", Language::Go).expect("must still produce a tree");
+        assert_eq!(status, ParseStatus::Partial);
+    }
+
+    #[test]
+    fn languages_without_adapters_have_no_grammar() {
+        assert!(grammar_for(Language::Unknown).is_none());
+        assert!(grammar_for(Language::Unsupported).is_none());
+    }
+
+    #[test]
+    fn unknown_language_parse_is_an_error_naming_the_language() {
+        let err = parse_source("x = 1", Language::Unknown).expect_err("must fail");
+        assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn skipped_constructor_yields_empty_facts() {
+        let file = ExtractedFile::skipped(ParseStatus::Skipped);
+        assert!(file.defs.is_empty() && file.refs.is_empty() && file.imports.is_empty());
+        assert_eq!(file.status, ParseStatus::Skipped);
+    }
+
+    #[test]
+    fn def_kind_strings_are_stable() {
+        assert_eq!(DefKind::Function.as_str(), "func");
+        assert_eq!(DefKind::Interface.as_str(), "interface");
+    }
+}

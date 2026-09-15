@@ -1,0 +1,32 @@
+[package]
+name = "cs-cli"
+description = "The contextslice command-line interface (MASTER_PLAN 6.1)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "contextslice"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+cs-scanner.workspace = true
+cs-index.workspace = true
+cs-git.workspace = true
+cs-select.workspace = true
+cs-render.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+tempfile.workspace = true

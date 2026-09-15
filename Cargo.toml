@@ -1,0 +1,108 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cs-scanner",
+    "crates/cs-extract",
+    "crates/cs-resolve",
+    "crates/cs-index",
+    "crates/cs-git",
+    "crates/cs-select",
+    "crates/cs-render",
+    "crates/cs-cli",
+    "crates/cs-mcp",
+    "crates/cs-bench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# Floor set by the highest requirement in the tree: tree-sitter 0.27 and
+# tree-sitter-language 0.1.8 both require 1.90, which outranks cargo-deny's 1.88.
+# Verified with `cargo +1.90 check --workspace --all-targets`; the CI msrv job
+# enforces it, so this is a tested promise rather than an aspiration.
+rust-version = "1.90"
+license = "Apache-2.0"
+repository = "https://github.com/contextslice/contextslice"
+homepage = "https://github.com/contextslice/contextslice"
+authors = ["ContextSlice contributors"]
+categories = ["development-tools", "command-line-utilities"]
+keywords = ["context", "llm", "tree-sitter", "coding-agents", "code-search"]
+
+# Dependencies are declared here once so every crate resolves the same version.
+# Pins and their justification live in docs/adr/ (see ADR-011 for the manifest).
+[workspace.dependencies]
+# --- internal ---
+cs-scanner = { path = "crates/cs-scanner" }
+cs-extract = { path = "crates/cs-extract" }
+cs-resolve = { path = "crates/cs-resolve" }
+cs-index = { path = "crates/cs-index" }
+cs-git = { path = "crates/cs-git" }
+cs-select = { path = "crates/cs-select" }
+cs-render = { path = "crates/cs-render" }
+
+# --- repository traversal (ARCHITECTURE §4.1) ---
+ignore = "0.4.33"
+globset = "0.4.18"
+
+# --- hashing (content keys, ARCHITECTURE §8) ---
+blake3 = "1.8.7"
+
+# --- parsing (LANGUAGES §9: grammars pinned, ABI via tree-sitter-language) ---
+tree-sitter = "0.27.0"
+tree-sitter-go = "0.25.0"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-python = "0.25.0"
+
+# --- storage (ADR-002) ---
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+
+# --- git signals (ARCHITECTURE §4.5) ---
+git2 = { version = "0.21.0", default-features = false }
+
+# --- token accounting (ARCHITECTURE §4.7: budget == measured tokens) ---
+tiktoken-rs = "0.12.0"
+
+# --- concurrency (ARCHITECTURE §7: order-normalized parallelism) ---
+rayon = "1.12.0"
+
+# --- serialization / errors / logging ---
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+tracing = "0.1.44"
+toml = "1.1.6"
+
+# --- CLI ---
+clap = { version = "4.6.7", features = ["derive"] }
+
+# --- dev ---
+tempfile = "3.27.0"
+assert_cmd = "2.2.2"
+predicates = "3.1.4"
+proptest = "1.11.0"
+
+[profile.release]
+# Local tool: startup latency and binary size matter more than peak throughput.
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.bench]
+debug = true
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Explicitly allowed: the algorithm spec (ALGORITHM.md) specifies f64 scoring
+# arithmetic and the tuning table uses literal constants on purpose.
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+cast_precision_loss = "allow"
+# Rejected rather than allowed silently: these would fight ARCHITECTURE §7's
+# explicit "sort before persisting" determinism strategy.
+implicit_hasher = "allow"

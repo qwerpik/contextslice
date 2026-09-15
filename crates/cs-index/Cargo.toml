@@ -1,0 +1,20 @@
+[package]
+name = "cs-index"
+description = "SQLite index storage, incremental updates, snapshots, FTS5 (ARCHITECTURE 4.4)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cs-scanner.workspace = true
+cs-extract.workspace = true
+cs-resolve.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
