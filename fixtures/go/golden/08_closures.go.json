@@ -1,0 +1,283 @@
+{
+  "package_name": "closures",
+  "defs": [
+    {
+      "name": "Handler",
+      "qual_name": "Handler",
+      "kind": "var",
+      "span": {
+        "start_line": 6,
+        "end_line": 9,
+        "start_byte": 68,
+        "end_byte": 162
+      },
+      "container": null,
+      "exported": true,
+      "signature": "var Handler = func(w http.ResponseWriter, r *http.Request) …",
+      "doc": "Handler serves traffic."
+    },
+    {
+      "name": "transforms",
+      "qual_name": "transforms",
+      "kind": "var",
+      "span": {
+        "start_line": 11,
+        "end_line": 14,
+        "start_byte": 168,
+        "end_byte": 240
+      },
+      "container": null,
+      "exported": false,
+      "signature": "var transforms = []func(int) int{ func(n int) int …, inc, }",
+      "doc": null
+    },
+    {
+      "name": "inc",
+      "qual_name": "inc",
+      "kind": "function",
+      "span": {
+        "start_line": 16,
+        "end_line": 16,
+        "start_byte": 242,
+        "end_byte": 278
+      },
+      "container": null,
+      "exported": false,
+      "signature": "func inc(n int) int",
+      "doc": null
+    },
+    {
+      "name": "handle",
+      "qual_name": "handle",
+      "kind": "function",
+      "span": {
+        "start_line": 18,
+        "end_line": 18,
+        "start_byte": 280,
+        "end_byte": 334
+      },
+      "container": null,
+      "exported": false,
+      "signature": "func handle(w http.ResponseWriter, r *http.Request)",
+      "doc": null
+    },
+    {
+      "name": "Immediately",
+      "qual_name": "Immediately",
+      "kind": "function",
+      "span": {
+        "start_line": 21,
+        "end_line": 23,
+        "start_byte": 380,
+        "end_byte": 448
+      },
+      "container": null,
+      "exported": true,
+      "signature": "func Immediately() string",
+      "doc": "Immediately runs a func literal at once."
+    }
+  ],
+  "refs": [
+    {
+      "name": "http",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 6,
+        "end_line": 6,
+        "start_byte": 85,
+        "end_byte": 89
+      },
+      "container": "Handler"
+    },
+    {
+      "name": "ResponseWriter",
+      "kind": "type_ref",
+      "span": {
+        "start_line": 6,
+        "end_line": 6,
+        "start_byte": 90,
+        "end_byte": 104
+      },
+      "container": "Handler"
+    },
+    {
+      "name": "http",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 6,
+        "end_line": 6,
+        "start_byte": 109,
+        "end_byte": 113
+      },
+      "container": "Handler"
+    },
+    {
+      "name": "Request",
+      "kind": "type_ref",
+      "span": {
+        "start_line": 6,
+        "end_line": 6,
+        "start_byte": 114,
+        "end_byte": 121
+      },
+      "container": "Handler"
+    },
+    {
+      "name": "r",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 7,
+        "end_line": 7,
+        "start_byte": 132,
+        "end_byte": 133
+      },
+      "container": "Handler"
+    },
+    {
+      "name": "Body",
+      "kind": "field_ref",
+      "span": {
+        "start_line": 7,
+        "end_line": 7,
+        "start_byte": 134,
+        "end_byte": 138
+      },
+      "container": "Handler"
+    },
+    {
+      "name": "Close",
+      "kind": "field_ref",
+      "span": {
+        "start_line": 7,
+        "end_line": 7,
+        "start_byte": 139,
+        "end_byte": 144
+      },
+      "container": "Handler"
+    },
+    {
+      "name": "handle",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 8,
+        "end_line": 8,
+        "start_byte": 148,
+        "end_byte": 154
+      },
+      "container": "Handler"
+    },
+    {
+      "name": "w",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 8,
+        "end_line": 8,
+        "start_byte": 155,
+        "end_byte": 156
+      },
+      "container": "Handler"
+    },
+    {
+      "name": "r",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 8,
+        "end_line": 8,
+        "start_byte": 158,
+        "end_byte": 159
+      },
+      "container": "Handler"
+    },
+    {
+      "name": "n",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 12,
+        "end_line": 12,
+        "start_byte": 224,
+        "end_byte": 225
+      },
+      "container": "transforms"
+    },
+    {
+      "name": "inc",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 13,
+        "end_line": 13,
+        "start_byte": 234,
+        "end_byte": 237
+      },
+      "container": "transforms"
+    },
+    {
+      "name": "n",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 16,
+        "end_line": 16,
+        "start_byte": 271,
+        "end_byte": 272
+      },
+      "container": "inc"
+    },
+    {
+      "name": "http",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 18,
+        "end_line": 18,
+        "start_byte": 294,
+        "end_byte": 298
+      },
+      "container": "handle"
+    },
+    {
+      "name": "ResponseWriter",
+      "kind": "type_ref",
+      "span": {
+        "start_line": 18,
+        "end_line": 18,
+        "start_byte": 299,
+        "end_byte": 313
+      },
+      "container": "handle"
+    },
+    {
+      "name": "http",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 18,
+        "end_line": 18,
+        "start_byte": 318,
+        "end_byte": 322
+      },
+      "container": "handle"
+    },
+    {
+      "name": "Request",
+      "kind": "type_ref",
+      "span": {
+        "start_line": 18,
+        "end_line": 18,
+        "start_byte": 323,
+        "end_byte": 330
+      },
+      "container": "handle"
+    }
+  ],
+  "imports": [
+    {
+      "raw": "net/http",
+      "alias": null,
+      "kind": "import",
+      "span": {
+        "start_line": 3,
+        "end_line": 3,
+        "start_byte": 25,
+        "end_byte": 35
+      }
+    }
+  ],
+  "status": "ok"
+}

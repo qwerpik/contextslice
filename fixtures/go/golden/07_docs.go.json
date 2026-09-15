@@ -1,0 +1,88 @@
+{
+  "package_name": "docs",
+  "defs": [
+    {
+      "name": "Guarded",
+      "qual_name": "Guarded",
+      "kind": "function",
+      "span": {
+        "start_line": 14,
+        "end_line": 14,
+        "start_byte": 336,
+        "end_byte": 377
+      },
+      "container": null,
+      "exported": true,
+      "signature": "func Guarded() *sync.Mutex",
+      "doc": "Guarded returns the mutex.\nThe second paragraph starts after an empty comment line."
+    },
+    {
+      "name": "Blocky",
+      "qual_name": "Blocky",
+      "kind": "function",
+      "span": {
+        "start_line": 20,
+        "end_line": 20,
+        "start_byte": 452,
+        "end_byte": 468
+      },
+      "container": null,
+      "exported": true,
+      "signature": "func Blocky()",
+      "doc": "Blocky is documented by a block comment.\nSecond line of the block."
+    },
+    {
+      "name": "NoDoc",
+      "qual_name": "NoDoc",
+      "kind": "function",
+      "span": {
+        "start_line": 22,
+        "end_line": 22,
+        "start_byte": 470,
+        "end_byte": 485
+      },
+      "container": null,
+      "exported": true,
+      "signature": "func NoDoc()",
+      "doc": null
+    }
+  ],
+  "refs": [
+    {
+      "name": "sync",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 14,
+        "end_line": 14,
+        "start_byte": 352,
+        "end_byte": 356
+      },
+      "container": "Guarded"
+    },
+    {
+      "name": "Mutex",
+      "kind": "type_ref",
+      "span": {
+        "start_line": 14,
+        "end_line": 14,
+        "start_byte": 357,
+        "end_byte": 362
+      },
+      "container": "Guarded"
+    }
+  ],
+  "imports": [
+    {
+      "raw": "sync",
+      "alias": null,
+      "kind": "import",
+      "span": {
+        "start_line": 5,
+        "end_line": 5,
+        "start_byte": 113,
+        "end_byte": 119
+      }
+    }
+  ],
+  "status": "ok"
+}

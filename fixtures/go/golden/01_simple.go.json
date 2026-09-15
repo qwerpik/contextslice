@@ -1,0 +1,143 @@
+{
+  "package_name": "simple",
+  "defs": [
+    {
+      "name": "Login",
+      "qual_name": "Login",
+      "kind": "function",
+      "span": {
+        "start_line": 8,
+        "end_line": 13,
+        "start_byte": 124,
+        "end_byte": 236
+      },
+      "container": null,
+      "exported": true,
+      "signature": "func Login(name string) (string, error)",
+      "doc": "Login authenticates a user by name."
+    },
+    {
+      "name": "token",
+      "qual_name": "token",
+      "kind": "function",
+      "span": {
+        "start_line": 15,
+        "end_line": 17,
+        "start_byte": 238,
+        "end_byte": 296
+      },
+      "container": null,
+      "exported": false,
+      "signature": "func token(name string) string",
+      "doc": null
+    },
+    {
+      "name": "ErrMissing",
+      "qual_name": "ErrMissing",
+      "kind": "var",
+      "span": {
+        "start_line": 19,
+        "end_line": 19,
+        "start_byte": 302,
+        "end_byte": 341
+      },
+      "container": null,
+      "exported": true,
+      "signature": "var ErrMissing = errors.New(\"missing name\")",
+      "doc": null
+    }
+  ],
+  "refs": [
+    {
+      "name": "name",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 9,
+        "end_line": 9,
+        "start_byte": 170,
+        "end_byte": 174
+      },
+      "container": "Login"
+    },
+    {
+      "name": "ErrMissing",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 10,
+        "end_line": 10,
+        "start_byte": 196,
+        "end_byte": 206
+      },
+      "container": "Login"
+    },
+    {
+      "name": "token",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 12,
+        "end_line": 12,
+        "start_byte": 218,
+        "end_byte": 223
+      },
+      "container": "Login"
+    },
+    {
+      "name": "name",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 12,
+        "end_line": 12,
+        "start_byte": 224,
+        "end_byte": 228
+      },
+      "container": "Login"
+    },
+    {
+      "name": "name",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 16,
+        "end_line": 16,
+        "start_byte": 279,
+        "end_byte": 283
+      },
+      "container": "token"
+    },
+    {
+      "name": "errors",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 19,
+        "end_line": 19,
+        "start_byte": 315,
+        "end_byte": 321
+      },
+      "container": "ErrMissing"
+    },
+    {
+      "name": "New",
+      "kind": "field_ref",
+      "span": {
+        "start_line": 19,
+        "end_line": 19,
+        "start_byte": 322,
+        "end_byte": 325
+      },
+      "container": "ErrMissing"
+    }
+  ],
+  "imports": [
+    {
+      "raw": "errors",
+      "alias": null,
+      "kind": "import",
+      "span": {
+        "start_line": 3,
+        "end_line": 3,
+        "start_byte": 23,
+        "end_byte": 31
+      }
+    }
+  ],
+  "status": "ok"
+}

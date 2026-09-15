@@ -108,12 +108,20 @@ beyond reading the index snapshot — this is what makes determinism testable.
 
 - **Purpose:** turn source files into structured facts.
 - **Inputs:** file bytes + language.
-- **Outputs:** `ExtractedFile { defs: Vec<Def>, refs: Vec<Ref>, imports: Vec<Import>,
-  sig_spans, doc_spans }` where `Def { name, qual_name, kind, span, container, signature,
-  doc }` and `Ref { name, span, container }`.
+- **Outputs (as built for Go, 2026-09-15):** `ExtractedFile { package_name,
+  defs: Vec<Def>, refs: Vec<Ref>, imports: Vec<Import>, status }` where
+  `Def { name, qual_name, kind, span, container, exported, signature, doc }`,
+  `Ref { name, kind, span, container }` (kind: `name_ref`/`field_ref`/
+  `type_ref` — the resolver's binding rule selector), and
+  `Import { raw, alias, kind, span }`. Signatures and docs are extracted
+  strings, not spans (spans alone cannot render L2/L3 without the source at
+  hand, and goldens pin the exact strings).
 - **Algorithms/data:** tree-sitter 0.27.x (pinned), **owned `.scm` query sets per
-  language**. Queries capture:
-  `@def.name/@def.kind/@def.sig/@def.doc`, `@ref.name`, `@import.module/@import.names`.
+  language** (`crates/cs-extract/src/go/queries/` for Go), compiled once per
+  process. Queries capture `@def.name/@def.node/@def.doc`,
+  `@ref.name/@ref.field/@ref.type`, `@import.path/@import.alias`; Rust
+  post-processing applies the rules queries cannot express (declaration-
+  position filtering, doc adjacency, signature construction — LANGUAGES §6.1).
   Parse timeout (default 250 ms/file) and node-count cap guard against pathological
   grammars.
 - **Why owned queries (ADR-012):** the upstream `tree-sitter-tags` convention relies on
@@ -265,6 +273,7 @@ CREATE TABLE files (
   id INTEGER PRIMARY KEY,
   path TEXT NOT NULL UNIQUE,          -- repo-relative, '/'-separated, normalized
   lang TEXT NOT NULL,                 -- 'go','ts','tsx','python',... 'unknown'
+  package_name TEXT,                  -- Go package clause; NULL when absent/broken
   hash BLOB NOT NULL,                 -- blake3 of content
   size INTEGER NOT NULL,
   mtime INTEGER NOT NULL,
@@ -278,7 +287,9 @@ CREATE TABLE symbols (
   name TEXT NOT NULL,
   qual_name TEXT NOT NULL,            -- module-path-qualified
   kind TEXT NOT NULL,                 -- func|method|class|struct|interface|type|const|var|enum...
+  exported INTEGER NOT NULL,          -- language's export rule, decided at extraction
   line INTEGER NOT NULL, end_line INTEGER NOT NULL,
+  start_byte INTEGER NOT NULL, end_byte INTEGER NOT NULL,  -- body slicing for L4/L5
   signature TEXT,                     -- rendered one-liner for L2/L3
   container_id INTEGER REFERENCES symbols(id),  -- enclosing symbol
   doc TEXT                            -- first doc-comment paragraph
@@ -290,6 +301,7 @@ CREATE TABLE refs (
   id INTEGER PRIMARY KEY,
   file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
+  kind TEXT NOT NULL,                 -- name_ref | field_ref | type_ref
   line INTEGER NOT NULL,
   container_id INTEGER REFERENCES symbols(id),
   resolved_symbol_id INTEGER REFERENCES symbols(id)  -- NULL = unresolved (approx graph)
@@ -299,6 +311,7 @@ CREATE INDEX idx_refs_name ON refs(name);
 CREATE TABLE imports (
   file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
   raw TEXT NOT NULL,                  -- specifier as written
+  alias TEXT,                         -- named alias; '.' dot import; '_' blank import; NULL plain
   resolved_file_id INTEGER REFERENCES files(id),    -- NULL = external/unresolved
   kind TEXT NOT NULL                  -- import|export-from|require|dynamic...
 );

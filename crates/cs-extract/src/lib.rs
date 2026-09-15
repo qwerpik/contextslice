@@ -121,14 +121,22 @@ pub enum ParseStatus {
 pub struct Def {
     /// Bare name as written in source (`Login`).
     pub name: String,
-    /// Module-qualified name (`internal/auth.Login`).
+    /// File-local qualified name (`Session.Validate` for a method on
+    /// `Session`). The module prefix (`internal/auth.`) is added by the
+    /// resolver, which knows the import graph; extraction only sees one file.
     pub qual_name: String,
     /// Canonical kind.
     pub kind: DefKind,
-    /// Source span.
+    /// Source span (the whole declaration, body included, so L4/L5 rendering
+    /// can slice bodies from it later).
     pub span: Span,
-    /// Enclosing symbol's qualified name, when nested (a method in a class).
+    /// Enclosing symbol's qualified name, when nested (a method on a type).
     pub container: Option<String>,
+    /// Whether the name is visible to importers. Language-specific casing
+    /// rules are applied at extraction, where the name is in hand, so goldens
+    /// pin the behavior (LANGUAGES.md §6.1). The resolver's
+    /// `LanguageResolver::is_exported` seam remains the cross-language API.
+    pub exported: bool,
     /// One-line signature for L2/L3 rendering.
     pub signature: Option<String>,
     /// First doc-comment paragraph, or `None`.
@@ -136,10 +144,44 @@ pub struct Def {
 }
 
 /// A reference to a name from inside a file.
+///
+/// The kind tells the resolver which binding rules apply (LANGUAGES.md §6.1):
+/// name refs bind against function/var/const candidates, field refs against
+/// struct fields and interface methods only, type refs against type
+/// definitions. Extraction reports syntax; the resolver assigns semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefKind {
+    /// A plain identifier in expression position (`Login`, `pkg` in
+    /// `pkg.Call`).
+    NameRef,
+    /// A field selection (`Session.UserID`, `pkg.Call` — the part after the
+    /// dot).
+    FieldRef,
+    /// A type usage (`*Session`, `map[string]Widget`, `io.Closer` — the name
+    /// part).
+    TypeRef,
+}
+
+impl RefKind {
+    /// Stable string used in goldens, docs and the future `refs` table.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NameRef => "name_ref",
+            Self::FieldRef => "field_ref",
+            Self::TypeRef => "type_ref",
+        }
+    }
+}
+
+/// A reference to a name from inside a file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ref {
     /// Referenced name as written.
     pub name: String,
+    /// What kind of reference this is; selects the resolver's binding rule.
+    pub kind: RefKind,
     /// Source span.
     pub span: Span,
     /// Enclosing symbol's qualified name, when the reference sits inside one.
@@ -164,8 +206,13 @@ pub enum ImportKind {
 /// An import or export-from statement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Import {
-    /// The specifier exactly as written (`./util`, `example.com/m/internal/auth`).
+    /// The specifier exactly as written, quotes stripped but nothing
+    /// unescaped (`./util`, `example.com/m/internal/auth`).
     pub raw: String,
+    /// The local alias, when the import carries one. Go spells the special
+    /// forms as written: `Some("." /* dot import */)` and
+    /// `Some("_" /* blank import */)`; `None` is a plain named import.
+    pub alias: Option<String>,
     /// Statement kind.
     pub kind: ImportKind,
     /// Source span.
@@ -175,6 +222,10 @@ pub struct Import {
 /// Everything extraction learned about one file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtractedFile {
+    /// The package clause's name (`package auth` → `Some("auth")`). The
+    /// resolver scopes same-package name binding by this; a file without a
+    /// package clause (empty or broken) yields `None`.
+    pub package_name: Option<String>,
     /// Definitions, in source order.
     pub defs: Vec<Def>,
     /// References, in source order.
@@ -190,6 +241,7 @@ impl ExtractedFile {
     #[must_use]
     pub const fn skipped(status: ParseStatus) -> Self {
         Self {
+            package_name: None,
             defs: Vec::new(),
             refs: Vec::new(),
             imports: Vec::new(),
@@ -215,6 +267,14 @@ pub enum ExtractError {
     /// tree-sitter returned no tree.
     #[error("tree-sitter produced no syntax tree for this file")]
     NoTree,
+    /// The language is Tier 1 and has a pinned grammar, but its extraction
+    /// adapter has not been implemented yet (TypeScript/JS and Python during
+    /// the Go-first milestone, MASTER_PLAN.md §15 step 3).
+    #[error("extraction adapter for language '{lang}' is not implemented yet")]
+    NotImplemented {
+        /// The language awaiting an adapter.
+        lang: &'static str,
+    },
 }
 
 /// The tree-sitter grammar for a language, as a runtime [`tree_sitter::Language`].
@@ -286,6 +346,42 @@ pub fn parse_source(
         ParseStatus::Ok
     };
     Ok((tree, status))
+}
+
+/// The Go extraction adapter (MASTER_PLAN.md §15 step 3).
+mod go;
+
+/// Extract definitions, references and imports from `source`.
+///
+/// This is `cs-extract`'s main entry point: parse plus query-driven
+/// extraction (ARCHITECTURE.md §4.2). The result is a pure function of
+/// `(source, language)` — no paths, no clocks, no randomness — which is what
+/// makes the determinism contract (ALGORITHM.md §12) testable.
+///
+/// Malformed source is not an error: it yields
+/// [`ParseStatus::Partial`] with whatever survived error recovery, under the
+/// documented degradation policy (LANGUAGES.md §6.1): a definition survives
+/// only if its declaration subtree contains no error node, and references
+/// with an error node among their ancestors are dropped.
+///
+/// # Errors
+///
+/// - [`ExtractError::IncompatibleGrammar`] for languages without an adapter.
+/// - [`ExtractError::NotImplemented`] for Tier 1 languages whose adapter has
+///   not been built yet (TS/JS, Python during the Go-first milestone).
+/// - [`ExtractError::NoTree`] if tree-sitter yields no tree at all.
+pub fn extract(source: &str, language: Language) -> Result<ExtractedFile, ExtractError> {
+    match language {
+        Language::Go => go::extract(source),
+        Language::TypeScript | Language::Tsx | Language::JavaScript | Language::Python => {
+            Err(ExtractError::NotImplemented {
+                lang: language.as_str(),
+            })
+        }
+        Language::Unsupported | Language::Unknown => Err(ExtractError::IncompatibleGrammar {
+            lang: language.as_str(),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -382,6 +478,30 @@ mod tests {
         let file = ExtractedFile::skipped(ParseStatus::Skipped);
         assert!(file.defs.is_empty() && file.refs.is_empty() && file.imports.is_empty());
         assert_eq!(file.status, ParseStatus::Skipped);
+        assert!(file.package_name.is_none());
+    }
+
+    #[test]
+    fn extract_dispatches_and_reports_unimplemented_languages() {
+        let ts = extract("export function f() {}", Language::TypeScript)
+            .expect_err("TS adapter is not implemented yet");
+        assert!(matches!(ts, ExtractError::NotImplemented { lang: "ts" }));
+        let py = extract("def f(): pass", Language::Python)
+            .expect_err("Python adapter is not implemented yet");
+        assert!(matches!(
+            py,
+            ExtractError::NotImplemented { lang: "python" }
+        ));
+    }
+
+    #[test]
+    fn ref_kind_strings_are_stable() {
+        // Goldens and the future refs table depend on these spellings.
+        assert_eq!(RefKind::NameRef.as_str(), "name_ref");
+        assert_eq!(RefKind::FieldRef.as_str(), "field_ref");
+        assert_eq!(RefKind::TypeRef.as_str(), "type_ref");
+        let json = serde_json::to_string(&RefKind::TypeRef).expect("serialize");
+        assert_eq!(json, r#""type_ref""#);
     }
 
     #[test]

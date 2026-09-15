@@ -1,0 +1,19 @@
+{
+  "package_name": null,
+  "defs": [],
+  "refs": [
+    {
+      "name": "print",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 2,
+        "end_line": 2,
+        "start_byte": 17,
+        "end_byte": 22
+      },
+      "container": null
+    }
+  ],
+  "imports": [],
+  "status": "partial"
+}

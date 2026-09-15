@@ -1,0 +1,58 @@
+{
+  "package_name": "buildtag",
+  "defs": [
+    {
+      "name": "Syscall",
+      "qual_name": "Syscall",
+      "kind": "function",
+      "span": {
+        "start_line": 8,
+        "end_line": 8,
+        "start_byte": 92,
+        "end_byte": 138
+      },
+      "container": null,
+      "exported": true,
+      "signature": "func Syscall() error",
+      "doc": "Syscall is available on windows."
+    }
+  ],
+  "refs": [
+    {
+      "name": "syscall",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 8,
+        "end_line": 8,
+        "start_byte": 122,
+        "end_byte": 129
+      },
+      "container": "Syscall"
+    },
+    {
+      "name": "EINVAL",
+      "kind": "field_ref",
+      "span": {
+        "start_line": 8,
+        "end_line": 8,
+        "start_byte": 130,
+        "end_byte": 136
+      },
+      "container": "Syscall"
+    }
+  ],
+  "imports": [
+    {
+      "raw": "syscall",
+      "alias": null,
+      "kind": "import",
+      "span": {
+        "start_line": 5,
+        "end_line": 5,
+        "start_byte": 45,
+        "end_byte": 54
+      }
+    }
+  ],
+  "status": "ok"
+}

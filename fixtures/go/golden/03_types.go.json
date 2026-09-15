@@ -1,0 +1,151 @@
+{
+  "package_name": "types",
+  "defs": [
+    {
+      "name": "Store",
+      "qual_name": "Store",
+      "kind": "struct",
+      "span": {
+        "start_line": 6,
+        "end_line": 9,
+        "start_byte": 60,
+        "end_byte": 124
+      },
+      "container": null,
+      "exported": true,
+      "signature": "type Store struct { … }",
+      "doc": "Store persists widgets."
+    },
+    {
+      "name": "Widget",
+      "qual_name": "Widget",
+      "kind": "struct",
+      "span": {
+        "start_line": 12,
+        "end_line": 16,
+        "start_byte": 166,
+        "end_byte": 250
+      },
+      "container": null,
+      "exported": true,
+      "signature": "type Widget struct { … }",
+      "doc": "Widget is the core domain type."
+    },
+    {
+      "name": "Reader",
+      "qual_name": "Reader",
+      "kind": "interface",
+      "span": {
+        "start_line": 19,
+        "end_line": 23,
+        "start_byte": 282,
+        "end_byte": 381
+      },
+      "container": null,
+      "exported": true,
+      "signature": "type Reader interface { … }",
+      "doc": "Reader reads widgets."
+    },
+    {
+      "name": "Celsius",
+      "qual_name": "Celsius",
+      "kind": "type",
+      "span": {
+        "start_line": 26,
+        "end_line": 26,
+        "start_byte": 416,
+        "end_byte": 431
+      },
+      "container": null,
+      "exported": true,
+      "signature": "type Celsius float64",
+      "doc": "Celsius is a named type."
+    },
+    {
+      "name": "Point",
+      "qual_name": "Point",
+      "kind": "type",
+      "span": {
+        "start_line": 29,
+        "end_line": 29,
+        "start_byte": 464,
+        "end_byte": 482
+      },
+      "container": null,
+      "exported": true,
+      "signature": "type Point = [2]float64",
+      "doc": "Point is a type alias."
+    }
+  ],
+  "refs": [
+    {
+      "name": "Widget",
+      "kind": "type_ref",
+      "span": {
+        "start_line": 7,
+        "end_line": 7,
+        "start_byte": 99,
+        "end_byte": 105
+      },
+      "container": "Store"
+    },
+    {
+      "name": "Store",
+      "kind": "type_ref",
+      "span": {
+        "start_line": 14,
+        "end_line": 14,
+        "start_byte": 196,
+        "end_byte": 201
+      },
+      "container": "Widget"
+    },
+    {
+      "name": "Widget",
+      "kind": "type_ref",
+      "span": {
+        "start_line": 21,
+        "end_line": 21,
+        "start_byte": 354,
+        "end_byte": 360
+      },
+      "container": "Reader"
+    },
+    {
+      "name": "io",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 22,
+        "end_line": 22,
+        "start_byte": 370,
+        "end_byte": 372
+      },
+      "container": "Reader"
+    },
+    {
+      "name": "Closer",
+      "kind": "type_ref",
+      "span": {
+        "start_line": 22,
+        "end_line": 22,
+        "start_byte": 373,
+        "end_byte": 379
+      },
+      "container": "Reader"
+    }
+  ],
+  "imports": [
+    {
+      "raw": "io",
+      "alias": null,
+      "kind": "import",
+      "span": {
+        "start_line": 3,
+        "end_line": 3,
+        "start_byte": 22,
+        "end_byte": 26
+      }
+    }
+  ],
+  "status": "ok"
+}

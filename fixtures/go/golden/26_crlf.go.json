@@ -1,0 +1,23 @@
+{
+  "package_name": "crlf",
+  "defs": [
+    {
+      "name": "Cr",
+      "qual_name": "Cr",
+      "kind": "function",
+      "span": {
+        "start_line": 4,
+        "end_line": 4,
+        "start_byte": 33,
+        "end_byte": 59
+      },
+      "container": null,
+      "exported": true,
+      "signature": "func Cr() int",
+      "doc": "Doc on CRLF."
+    }
+  ],
+  "refs": [],
+  "imports": [],
+  "status": "ok"
+}

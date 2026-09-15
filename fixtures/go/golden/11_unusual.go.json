@@ -1,0 +1,239 @@
+{
+  "package_name": "unusual",
+  "defs": [
+    {
+      "name": "OneLiner",
+      "qual_name": "OneLiner",
+      "kind": "function",
+      "span": {
+        "start_line": 3,
+        "end_line": 3,
+        "start_byte": 17,
+        "end_byte": 50
+      },
+      "container": null,
+      "exported": true,
+      "signature": "func OneLiner() int",
+      "doc": null
+    },
+    {
+      "name": "WithSemicolons",
+      "qual_name": "WithSemicolons",
+      "kind": "function",
+      "span": {
+        "start_line": 5,
+        "end_line": 5,
+        "start_byte": 52,
+        "end_byte": 110
+      },
+      "container": null,
+      "exported": true,
+      "signature": "func WithSemicolons() int",
+      "doc": null
+    },
+    {
+      "name": "Ünicode",
+      "qual_name": "Ünicode",
+      "kind": "function",
+      "span": {
+        "start_line": 7,
+        "end_line": 7,
+        "start_byte": 112,
+        "end_byte": 144
+      },
+      "container": null,
+      "exported": true,
+      "signature": "func Ünicode() int",
+      "doc": null
+    },
+    {
+      "name": "ünicode",
+      "qual_name": "ünicode",
+      "kind": "function",
+      "span": {
+        "start_line": 9,
+        "end_line": 9,
+        "start_byte": 146,
+        "end_byte": 178
+      },
+      "container": null,
+      "exported": false,
+      "signature": "func ünicode() int",
+      "doc": null
+    },
+    {
+      "name": "init",
+      "qual_name": "init",
+      "kind": "function",
+      "span": {
+        "start_line": 11,
+        "end_line": 11,
+        "start_byte": 180,
+        "end_byte": 208
+      },
+      "container": null,
+      "exported": false,
+      "signature": "func init()",
+      "doc": null
+    },
+    {
+      "name": "main",
+      "qual_name": "main",
+      "kind": "function",
+      "span": {
+        "start_line": 13,
+        "end_line": 13,
+        "start_byte": 210,
+        "end_byte": 224
+      },
+      "container": null,
+      "exported": false,
+      "signature": "func main()",
+      "doc": null
+    },
+    {
+      "name": "Tagged",
+      "qual_name": "Tagged",
+      "kind": "struct",
+      "span": {
+        "start_line": 16,
+        "end_line": 18,
+        "start_byte": 262,
+        "end_byte": 308
+      },
+      "container": null,
+      "exported": true,
+      "signature": "type Tagged struct { … }",
+      "doc": "Tagged carries struct tags."
+    },
+    {
+      "name": "HardTokens",
+      "qual_name": "HardTokens",
+      "kind": "function",
+      "span": {
+        "start_line": 21,
+        "end_line": 39,
+        "start_byte": 371,
+        "end_byte": 635
+      },
+      "container": null,
+      "exported": true,
+      "signature": "func HardTokens()",
+      "doc": "HardTokens exercises lexer corner cases and control flow."
+    }
+  ],
+  "refs": [
+    {
+      "name": "x",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 5,
+        "end_line": 5,
+        "start_byte": 93,
+        "end_byte": 94
+      },
+      "container": "WithSemicolons"
+    },
+    {
+      "name": "y",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 5,
+        "end_line": 5,
+        "start_byte": 107,
+        "end_byte": 108
+      },
+      "container": "WithSemicolons"
+    },
+    {
+      "name": "OneLiner",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 11,
+        "end_line": 11,
+        "start_byte": 198,
+        "end_byte": 206
+      },
+      "container": "init"
+    },
+    {
+      "name": "i",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 26,
+        "end_line": 26,
+        "start_byte": 494,
+        "end_byte": 495
+      },
+      "container": "HardTokens"
+    },
+    {
+      "name": "i",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 26,
+        "end_line": 26,
+        "start_byte": 501,
+        "end_byte": 502
+      },
+      "container": "HardTokens"
+    },
+    {
+      "name": "i",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 27,
+        "end_line": 27,
+        "start_byte": 512,
+        "end_byte": 513
+      },
+      "container": "HardTokens"
+    },
+    {
+      "name": "s",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 32,
+        "end_line": 32,
+        "start_byte": 571,
+        "end_byte": 572
+      },
+      "container": "HardTokens"
+    },
+    {
+      "name": "v",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 34,
+        "end_line": 34,
+        "start_byte": 602,
+        "end_byte": 603
+      },
+      "container": "HardTokens"
+    },
+    {
+      "name": "esc",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 37,
+        "end_line": 37,
+        "start_byte": 622,
+        "end_byte": 625
+      },
+      "container": "HardTokens"
+    },
+    {
+      "name": "ch",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 38,
+        "end_line": 38,
+        "start_byte": 631,
+        "end_byte": 633
+      },
+      "container": "HardTokens"
+    }
+  ],
+  "imports": [],
+  "status": "ok"
+}

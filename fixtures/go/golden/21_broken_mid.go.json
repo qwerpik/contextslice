@@ -1,0 +1,23 @@
+{
+  "package_name": "brokenmid",
+  "defs": [
+    {
+      "name": "Fine",
+      "qual_name": "Fine",
+      "kind": "function",
+      "span": {
+        "start_line": 3,
+        "end_line": 3,
+        "start_byte": 19,
+        "end_byte": 47
+      },
+      "container": null,
+      "exported": true,
+      "signature": "func Fine() int",
+      "doc": null
+    }
+  ],
+  "refs": [],
+  "imports": [],
+  "status": "partial"
+}

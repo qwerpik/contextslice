@@ -28,6 +28,7 @@ intact.
 | [014](ADR-014-tokenizer-choice.md) | tiktoken-rs for budget measurement | Accepted | Bootstrap |
 | [015](ADR-015-competitive-landscape-verification.md) | Competitive landscape verified; three claims corrected | Accepted | Bootstrap |
 | [016](ADR-016-rejected-reconnaissance-findings.md) | Reconnaissance findings rejected, and why | Accepted | Bootstrap |
+| [017](ADR-017-extraction-contract-as-built.md) | Extraction contract as built (package, ref kinds, exported, aliases, degradation) | Accepted | Go extraction |
 
 ## How these were verified
 

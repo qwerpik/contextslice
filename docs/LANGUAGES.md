@@ -107,22 +107,76 @@ cs-index, or cs-cli knows a language exists beyond `lang` strings.
 
 ### 6.1 Go
 
-- **Extraction:** defs = `function_declaration`, `method_declaration`, `type_declaration`
-  (struct/interface incl. method sets), `const`/`var` groups (each specifier a def);
-  refs = `identifier` + `selector_expression.field` (field refs typed `field_ref`);
-  imports = `import_spec` paths. Signatures render params/results with type text.
-- **Resolution:** map `import path` via `go.mod module` prefix strip → repo-relative
-  dir → package (all `.go` files in dir); relative imports (`./`) resolved directly;
-  stdlib and non-module paths → `External`. Ref→def matching scoped: same-package
-  unqualified names; cross-package `pkg.Name` matched against the imported package's
-  *exported* defs only. Optional precision sidecar (`go list -json ./...` + later
-  `go/packages`) behind `--deep=go`, never required.
-- **Hard parts:** embedded/ promoted fields and methods (approximate: treat promoted
-  methods as defs of the embedded type — labeled over-approximation); build-tagged
-  files (index all, note duplicates); `vendor/` (indexed but excluded from seeds unless
-  `--include`).
-- **Tests:** `*_test.go` ⇄ same-dir non-test files; `example_test.go` attached to the
-  package file defining the symbol.
+*Implemented (2026-09-15); this section is the as-built contract. Deviations
+from the pre-implementation sketch are recorded in ADR-017.*
+
+- **Extraction output:** `package_name` from the package clause (needed by the
+  resolver for same-package scoping; `None` for empty/broken files); defs,
+  refs, imports per the shared `ExtractedFile` shape.
+- **Defs (top-level only, one per name):** `function_declaration` →
+  `Function`; `method_declaration` → `Method` (container = receiver base
+  type, `*`/generics stripped: `(s *Session)` → `Session`, `(p Pair[T])` →
+  `Pair`); `type_spec` → `Struct`/`Interface`/`Type` by its type child;
+  `type_alias` → `Type`; each `const_spec`/`var_spec` name → `Const`/`Var`
+  (multi-name specs `var X, Y int` share the spec span; blank `_` names are
+  dropped — never addressable). Declarations *inside* function bodies are
+  never defs (queries are rooted at `source_file` to guarantee this).
+- **`exported`:** Unicode-aware first-rune uppercase, per the Go spec
+  (`Ünicode` is exported).
+- **Signatures:** functions/methods = declaration header to the body,
+  whitespace-normalized (receiver and type parameters included);
+  struct/interface = `type Name[T any] struct { … }` (literal ellipsis;
+  bodies render from spans at L3, never stored); named types/aliases = full
+  spec; const/var specs = text with every func-literal *body* replaced by
+  `…` so `var Handler = func(w R) error {…}` keeps its type shape.
+- **Docs:** a contiguous comment block immediately above the declaration —
+  *no blank line*, verified on line numbers because blank lines leave no
+  trace in the tree (the query `.` anchor is only a candidate filter);
+  first paragraph only; `//` and `/* */` forms both stripped. Package
+  comments are not stored (no def to attach to; nothing downstream needs
+  them). Struct-field docs are not extracted (fields are not defs).
+- **Refs, three kinds:** `name_ref` (identifiers in expression position,
+  including the package qualifier of `qualified_type`/selector expressions —
+  the resolver needs it for import-scoped binding); `field_ref`
+  (field_identifier kept **only** under `selector_expression` — the same
+  node type also spells method/field/interface-method *names*, which are
+  declarations); `type_ref` (type_identifier kept unless in a
+  type_spec/type_alias name position).
+- **Declaration positions never become refs:** function/param/receiver names
+  (incl. `variadic_parameter_declaration`), leading identifier runs of
+  var/const specs (top-level and local), type-parameter names, `:=` left
+  sides (short vars, if/for init, range clauses with `:=`, type-switch
+  `alias` variables). Local *uses* do remain refs — whether a name is
+  local is scope information beyond syntax; the resolver's sqrt-damped
+  binding absorbs the approximation.
+- **Universe filter:** references to Go's predeclared identifiers (`int`,
+  `error`, `make`, `any`, … full list in `cs-extract/src/go/mod.rs`) are
+  dropped — they can never bind to a repository definition and would
+  otherwise dominate the refs table. The blank identifier `_` likewise
+  never appears.
+- **Imports:** raw path with quotes stripped; `alias` as written — named
+  (`f`), dot (`.`), blank (`_`) imports all recorded; Go has only the
+  static `Import` kind.
+- **Degradation policy (normative):** a def survives a partial file only if
+  its declaration subtree contains no error node; refs are dropped if any
+  ancestor is an error node **or** if they fall inside a dropped
+  declaration's span (recovery may leave such regions un-`ERROR`-wrapped);
+  the file is labeled `partial` with whatever survived cleanly.
+- **Resolution:** map `import path` via `go.mod module` prefix strip →
+  repo-relative dir → package (all `.go` files in dir); relative imports
+  (`./`) resolved directly; stdlib and non-module paths → `External`.
+  Ref→def matching scoped: same-package unqualified names; cross-package
+  `pkg.Name` matched against the imported package's *exported* defs only
+  (the `exported` flag comes from extraction). Optional precision sidecar
+  (`go list -json ./...` + later `go/packages`) behind `--deep=go`, never
+  required.
+- **Hard parts:** embedded/promoted fields and methods (approximate: treat
+  promoted methods as defs of the embedded type — labeled
+  over-approximation); build-tagged files (index all — extraction is
+  per-file, so same-named defs in differently-tagged files coexist);
+  `vendor/` (indexed but excluded from seeds unless `--include`).
+- **Tests:** `*_test.go` ⇄ same-dir non-test files; `example_test.go`
+  attached to the package file defining the symbol.
 - **Config files:** `go.mod`, `*.yaml` next to code, `Makefile`.
 
 ### 6.2 TypeScript / JavaScript

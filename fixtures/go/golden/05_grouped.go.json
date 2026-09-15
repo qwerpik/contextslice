@@ -1,0 +1,98 @@
+{
+  "package_name": "grouped",
+  "defs": [
+    {
+      "name": "Pair",
+      "qual_name": "Pair",
+      "kind": "struct",
+      "span": {
+        "start_line": 5,
+        "end_line": 7,
+        "start_byte": 64,
+        "end_byte": 100
+      },
+      "container": null,
+      "exported": true,
+      "signature": "type Pair struct { … }",
+      "doc": "Pair holds two values of one type."
+    },
+    {
+      "name": "Key",
+      "qual_name": "Key",
+      "kind": "type",
+      "span": {
+        "start_line": 9,
+        "end_line": 9,
+        "start_byte": 129,
+        "end_byte": 139
+      },
+      "container": null,
+      "exported": true,
+      "signature": "type Key string",
+      "doc": "Key identifies a pair."
+    },
+    {
+      "name": "UsesLocals",
+      "qual_name": "UsesLocals",
+      "kind": "function",
+      "span": {
+        "start_line": 13,
+        "end_line": 21,
+        "start_byte": 207,
+        "end_byte": 344
+      },
+      "container": null,
+      "exported": true,
+      "signature": "func UsesLocals()",
+      "doc": "UsesLocals declares locals that must not become definitions."
+    }
+  ],
+  "refs": [
+    {
+      "name": "localC",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 17,
+        "end_line": 17,
+        "start_byte": 297,
+        "end_byte": 303
+      },
+      "container": "UsesLocals"
+    },
+    {
+      "name": "localV",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 18,
+        "end_line": 18,
+        "start_byte": 309,
+        "end_byte": 315
+      },
+      "container": "UsesLocals"
+    },
+    {
+      "name": "localV2",
+      "kind": "name_ref",
+      "span": {
+        "start_line": 19,
+        "end_line": 19,
+        "start_byte": 321,
+        "end_byte": 328
+      },
+      "container": "UsesLocals"
+    },
+    {
+      "name": "localT",
+      "kind": "type_ref",
+      "span": {
+        "start_line": 20,
+        "end_line": 20,
+        "start_byte": 334,
+        "end_byte": 340
+      },
+      "container": "UsesLocals"
+    }
+  ],
+  "imports": [],
+  "status": "ok"
+}

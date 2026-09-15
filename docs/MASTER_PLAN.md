@@ -577,8 +577,44 @@ holds. Steps 1–9 are Phase 0+1, steps 10–15 are Phase 2.
 | 014 | tiktoken-rs with embedded tables | Budget estimation and measurement must share one code path, offline |
 | 015 | Competitive landscape verified; three claims corrected | Verified against competitors' source; budget-fitting is a narrower moat than assumed |
 | 016 | Reconnaissance findings rejected, with reasons and reopen triggers | Rejected findings must stay rejected on the record |
+| 017 | Extraction contract as built: package_name, ref kinds, exported, import aliases, normative degradation policy | Implementing the Go adapter resolved nine open contract questions (ADR-017) |
 
 Full records live in [`docs/adr/`](adr/) — see the [ADR index](adr/README.md). ADR-011
 through ADR-016 were produced by the bootstrap verification pass: they record what was
 checked against upstream reality, what the check changed, and what would reopen each
-decision.
+decision. ADR-017 came out of the Go extraction milestone.
+
+---
+
+## 17. Progress log
+
+### 2026-09-15 — Go extraction complete (step 3 of §15)
+
+**Delivered:** the Go extraction adapter (`cs-extract/src/go/`), the first
+implementation of the extraction contract, plus the golden-fixture regime the
+remaining adapters inherit: 20 fixtures in `fixtures/go/` covering every
+category of §15 step 3 (functions, methods/pointer receivers, interfaces,
+structs, embedding, aliases, generics, consts/vars, grouped declarations,
+aliased/dot/blank imports, package/doc comments, closures, test files,
+build-tagged pairs, pathological formatting, malformed files with defined
+degradation), each with a byte-exact JSON golden; 30 unit tests; determinism
+tests (re-extraction and reversed batch order); a perf harness.
+
+**Verified:** all goldens reviewed line-by-line against their fixtures (three
+real bugs found and fixed during review: variadic-parameter names leaking as
+refs, refs surviving inside dropped error declarations, blank `_` defs).
+Measured on real repositories (release build, single-threaded): gin — 99
+files / 0.7 MiB in 0.24 s (2.74 MiB/s, 411 files/s, 1,699 defs, 0 partial);
+chi — 84 files / 0.3 MiB in 0.11 s (2.94 MiB/s, 733 files/s, 539 defs,
+0 partial). Against the §9 budget (~10 MB/s/core parse): 100k files
+extrapolates to ≈2 min single-threaded, well inside the 12-minute cold-index
+target. No premature optimization warranted by the measurements.
+
+**Contract changes:** recorded in ADR-017 and LANGUAGES.md §6.1 (as-built),
+ARCHITECTURE.md §4.2/§5 updated to match.
+
+**Next bottleneck:** §15 step 4 — the Go resolver (`cs-resolve`'s Go
+`LanguageResolver`: `go.mod` module-prefix mapping, directory→package
+expansion, external marking, then same-package/export-only ref binding).
+Extraction now produces everything the resolver consumes (`package_name`,
+ref kinds, `exported`, import aliases); nothing in extraction blocks it.
