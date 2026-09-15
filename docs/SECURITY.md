@@ -73,8 +73,13 @@ instructions", doc-strings with fake directives, identifier names like
 
 ## 5. Secret handling
 
-1. **Detection:** secret-pattern scan (high-entropy strings + known formats: AWS/GCP/
-   GitHub tokens, private keys) over files *selected at L4/L5* before rendering.
+1. **Detection:** secret-pattern scan (high-entropy strings + known formats) over files
+   *selected at L4/L5* before rendering. The rule source is deliberately undecided at
+   bootstrap (ADR-016): gitleaks' default rules (MIT, verified 2026-09-15; TOML with
+   Go/RE2 regex — no lookaheads, so they port directly to Rust's `regex` crate) are the
+   leading candidate, to be revisited in Phase 2 with a measured false-positive rate on
+   real repositories — here a false positive silently redacts code from an agent's
+   context, a different cost model from a failed CI build.
    Default action: **skip the matching region, emit a `[redacted: possible secret]`
    marker, warn on stderr**. Configurable: `--secrets=skip|warn|allow`.
 2. **Informed consent for pasting:** the header of every slice carries a one-line data-

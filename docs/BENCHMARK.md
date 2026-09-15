@@ -128,7 +128,10 @@ point of the harness) — this is a *pre-marketing* gate, not a post-launch apol
 - ~50 tasks: Python subset drawn SWE-bench-lite-style (repos within our adapter set),
   plus curated Go/TS tasks from corpus repos (issue text + failing test reproduced at
   the parent commit; inclusion requires the test to fail pre- and pass post-merge —
-  same standard as SWE-bench's fail-to-pass).
+  same standard as SWE-bench's fail-to-pass). Instance extraction and fail-to-pass
+  validation reuse the SWE-bench tooling (MIT) on the Python side — the one place
+  Python enters the project, where that tooling dictates the toolchain (ADR-016); the
+  Go/TS tasks use our own corpus tooling (§3.1).
 - **Sample size is computed before the run, not after.** Paired designs are far less
   efficient than they look when the outcome is binary and the arms agree on most tasks.
   Our exact two-sided McNemar computation (α = 0.05) for a *true* 12-point success-rate

@@ -234,3 +234,21 @@ Tier-2-language-quality adapter, 1–2 days for a grammar-only "heuristic plus" 
 - A `LANGUAGE_SUPPORT.md` matrix (generated from adapter registrations + golden pass
   rates) publishes per-language extraction coverage; "experimental" is a visible label,
   never a surprise.
+
+## 10. Reference query sets and attribution
+
+ADR-012 settles the decision: queries are first-party, in our own capture schema; the
+tags-crate convention is unusable (its predicates are silently ignored by the core
+bindings — measured, not assumed). External query sets may still be consulted for
+**grammar node names**, under the rules below. Sets checked 2026-09-15:
+
+| Source | License | Location | Use |
+|---|---|---|---|
+| aider tag queries | Apache-2.0 (verified in ADR-012) | `Aider-AI/aider` at `aider/queries/tree-sitter-language-pack/*.scm` (58 files) | node-name reference only; **no `typescript-tags.scm` exists** — TS node names need another source |
+| nvim-treesitter queries | verify before consulting (rule 1) | `nvim-treesitter/nvim-treesitter` at `queries/<lang>/*.scm` | highlight-oriented; secondary node-name reference |
+
+Rules: (1) a source enters this table only after its license is verified and dated;
+(2) queries are never copied as a starting point (ADR-012); (3) any query file taking
+substantial structural inspiration from a source carries a header comment naming the
+source, its license, and the upstream commit consulted; (4) credit for conceptual
+borrowings (sqrt-damping, the uninformative-name dampener) lives in ALGORITHM.md §15.
