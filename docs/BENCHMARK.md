@@ -184,7 +184,7 @@ The negative-results section is mandatory — it is also our tuning signal.
 | Benchmark | What it is | How we relate |
 |---|---|---|
 | **ContextBench** (arXiv 2602.05892, verified 2026-09-15) | 1,136 tasks, 66 repos, 8 languages, human-annotated gold contexts; public fixed-harness leaderboard with **Recall, Pass@1, Context F1 and cost** | Our intrinsic metrics align deliberately (recall/precision/efficiency framing); cross-evaluating ContextSlice on their public gold contexts is a Phase 6 goal — third-party gold sets are the strongest credibility signal. **Two cautions.** (1) Their abstract scopes the work as one that *"augments existing end-to-end benchmarks with intermediate gold-context metrics"*, so we must not cite it as a substitute for outcome evaluation; its Pass@1 column exists but their contribution is the retrieval-centric process signal. (2) Their findings are load-bearing *for* us and must be engaged honestly: sophisticated scaffolding yields only marginal retrieval gains; LLMs favour recall over precision, introducing noise; balanced retrieval achieves higher accuracy at lower cost; and retrieved context is often never used in the final solution. |
-| **SWE-ContextBench** (arXiv 2602.08316, verified 2026-09-15) | 1,100 base + 376 related tasks across 51 repos / 9 languages; measures resolution accuracy, runtime and token cost under context-reuse strategies, comparing **named shipped context/memory tools** | Partially validates our thesis and partially constrains it. It supports the core mechanism — *"accurately summarized and retrieved previous experience can significantly improve resolution accuracy and reduce runtime and token cost… unfiltered or incorrectly selected context provides limited or negative benefits"* — which is the strongest published evidence that context **selection** quality moves outcomes. But it also means "nobody evaluates context tools on outcomes" is **false**, so we must not make that claim (see §7). Our extrinsic tier adapts its cost-accounting. |
+| **SWE-ContextBench** (arXiv 2602.08316, verified 2026-09-15) | 1,100 base + 376 related tasks across 51 repos / 9 languages; measures resolution accuracy, runtime and token cost under context-reuse strategies, comparing **named shipped context tools — specifically agent *memory* frameworks (Mem0, LangMem, Supermemory, OpenViking), not repository packers** | Partially validates our thesis and partially constrains it. It supports the core mechanism — *"accurately summarized and retrieved previous experience can significantly improve resolution accuracy and reduce runtime and token cost… unfiltered or incorrectly selected context provides limited or negative benefits"* — which is the strongest published evidence that context **selection** quality moves outcomes. But it also means "nobody evaluates context tools on outcomes" is **false**, so we must not make that claim (see §7). Our extrinsic tier adapts its cost-accounting. |
 | **SWE-bench (Verified/Lite)** | Issue → patch, fail-to-pass judging | Source of Python extrinsic tasks; we do not claim SWE-bench leaderboard comparability (different scaffold) |
 | **Graft** (trailhq/Graft, MIT) | Graph CLI/MCP; publishes **SWE-bench Verified** results (official `swebench` 4.1.0 grader, n=50, +12 pts correctness, +23% tokens) alongside a self-run controlled sweep | One of several counterexamples to "nobody publishes agent outcomes" (verified 2026-09-15; see §7 for the others, which are stronger). Two limits matter for this one: its controlled-sweep harness was removed from the public repo (CHANGELOG v0.7.0, "The `bench/` benchmark harness is no longer part of the published repo"), and n=50 is severely underpowered — our own exact two-sided McNemar computation puts the power to detect a true 12-point effect at n=50 at only **2–6%** (depending on the discordant-pair rate; see §4.2). **Consequence for us:** publish the harness, corpus manifests, seeds and per-task logs, and size the extrinsic tier for the effect we intend to claim (§4.2). "First to publish" is not a claim we make; being checkable is. |
 | **Aider polyglot** | 225 Exercism exercises, edit-format focused | Not used: exercises are self-contained single files — context selection is untested by construction |
@@ -207,14 +207,29 @@ producing the over-budget pack (their docs, 2026-09-15)" rather than "packers ca
 a budget".
 
 This rule is not theoretical. The project's founding documents asserted that nobody in
-this category publishes agent-outcome evaluation. That is false, and the counterexamples
-are strong: **RepoGraph** (ICLR 2025, arXiv 2410.14684) is a repository-context module
-ablated on SWE-bench resolver rates with released code; **SWE-ContextBench** compares
-named shipped context tools on resolution accuracy and cost; **ContextBench** publishes a
-fixed-harness leaderboard carrying Pass@1; and **Aider** has shipped a reproducible
-end-to-end polyglot leaderboard for years (it varies the model and never ablates its repo
-map — but the artifact exists). Any of these alone would have discredited a public
-negative claim. See ADR-015 for the full correction.
+this category publishes agent-outcome evaluation. That is false. The counterexamples, in
+descending strength **as evidence against that specific claim**:
+
+1. **RepoGraph** (ICLR 2025, arXiv 2410.14684) — *the decisive one.* A repository-context
+   plug-in module evaluated on SWE-bench, reporting *"substantially boosts the performance
+   of all systems"* across four methods, with released code, runnable scripts and cached
+   graphs. This is a **reproducible agent-outcome ablation of a repository-context
+   mechanism**, which is precisely the artifact the withdrawn claim said does not exist.
+2. **Aider** — the strongest *shipped-tool* precedent: a reproducible end-to-end polyglot
+   leaderboard with a public harness, per-run cost, tokens and commit hash. It varies the
+   model and never ablates its repo map, so it does not evaluate *context selection* — but
+   the artifact exists, which is what the claim denied.
+3. **ContextBench** (arXiv 2602.05892) — public fixed-harness leaderboard carrying Recall,
+   **Pass@1**, Context F1 and cost. Scoped by its authors as augmenting end-to-end
+   benchmarks, so cite it as a process signal, not an outcome benchmark.
+4. **SWE-ContextBench** (arXiv 2602.08316) — evidence that the *broader context-management
+   field* does token- and cost-normalized outcome benchmarking. Its subjects are agent
+   **memory** frameworks (Mem0, LangMem, Supermemory, OpenViking), **not repository
+   packers**, so it does **not** support "repo packers are benchmarked". Cite it for the
+   field, never for the category.
+
+Any of the first two alone would have discredited a public negative claim. See ADR-015 for
+the full correction.
 
 ## 8. Corpus governance
 

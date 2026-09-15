@@ -74,11 +74,13 @@ task-conditioned ranking with no LLM. Graft also ships signatures-only output
 (`graft skeleton`), and Repomix offers per-file inclusion levels. Mixed granularity as a
 *capability* is therefore not the differentiator.
 
-What we could not find anywhere is the **conjunction**: the token budget itself deciding
-each file's level, under a hard never-exceed ceiling. Graft's controls are a result
-*count* (`--limit`, `--max-dirs`) and its level is a manual flag; Repomix's levels are
-hand-declared globs with no CLI flag; Aider's split is decided by chat membership and its
-budget is soft. That is the whole claim, and ADR-015 records how it was verified.
+What we could not find is the **conjunction**: the token budget itself deciding each
+file's level, under a hard never-exceed ceiling. Four tools get halfway and stop in the
+same place — Aider's split is decided by chat membership with a soft ±15% budget; Graft's
+controls are a result *count* (`--limit`, `--max-dirs`) with a manual level flag;
+Repomix's levels are hand-declared config globs; SnapZip, the closest match to our
+positioning, has no granularity levels at all. ADR-015 records how each was verified, and
+states plainly that this is "we could not find" rather than "it does not exist".
 
 There is **no patent moat here**. The defensive position is execution quality,
 adapter depth, and accumulated evaluation data.

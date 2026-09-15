@@ -146,14 +146,29 @@ Honesty about each, as verified 2026-09-15:
   by hand. Aider mixes full source and skeletons but splits them by *chat membership*, not
   by budget, and its budget is soft. Nobody we could verify makes the budget itself
   decide each file's level.
-- **(c) is thinner than we assumed.** Graft publishes SWE-bench Verified results
-  (official `swebench` grader, n=50), so "nobody publishes agent outcomes" is false. But
-  it removed its harness from the public repo (CHANGELOG v0.7.0), and its n=50 result is
-  underpowered: our own exact two-sided McNemar computation puts the power to detect a
-  true 12-point effect at n=50 at only **2–6%** (BENCHMARK §4.2). So the published
-  outcome evidence in this category is real but individually weak. That is the standard
-  we hold ourselves to in BENCHMARK.md — *reproducible and adequately powered* — and it
-  is a harder bar than "nobody does it", as well as a more useful one.
+- **(c) is thinner than we assumed, and the honest citation is RepoGraph, not a
+  vendor.** "Nobody publishes agent outcomes" is false, and the decisive counterexample
+  is **RepoGraph** (ICLR 2025, arXiv 2410.14684): a repository-context module ablated on
+  SWE-bench with released code — a reproducible agent-outcome ablation of exactly the kind
+  of mechanism we build. Aider adds the shipped-tool precedent (reproducible polyglot
+  leaderboard, though it never ablates its repo map). The vendor evidence is weaker:
+  Graft's SWE-bench run is n=50, and our own exact two-sided McNemar computation puts the
+  power to detect a true 12-point effect at that size at only **2–6%** (BENCHMARK §4.2).
+  The standard we hold ourselves to is therefore not "first to publish" but
+  *reproducible and adequately powered* — a harder bar, and a more useful one.
+
+**A fourth near-miss worth naming (verified 2026-09-15).** **SnapZip**
+(`MTEnt/SnapZip`, ~3★) is the closest match to this project's *positioning*: local-first
+CLI, SQLite + FTS5 index, task modes, read-only MCP stdio server, and packs that report
+budget use and truncation. It satisfies task-conditioned selection with a budget
+(`snapzip pack --query "…" --mode debug --limit 5 --budget 12000`), but it has **no
+granularity levels at all** — a grep of its README for signature/skeleton/granular/stub
+terms returns zero hits, and the dominant knob is `--limit`, a result count. It degrades
+by *omitting* ranked results and blind-truncating, surfacing "truncation" as a quality
+warning. That is the fourth independent near-miss doing task-conditioning without
+budget-driven granularity (with Aider, jCodeMunch and Graft), and at ~3★ it also shows
+the *idea* is being attempted by others. The differentiation must therefore be argued on
+the mechanism, never on novelty of concept.
 
 ---
 
@@ -214,6 +229,7 @@ Honesty about each, as verified 2026-09-15:
 | claude-context | 12.5k | MCP hybrid BM25+dense chunk search | Retrieval, not assembly | Chunking only | No | Yes (provider) | No | Partial (needs provider) | npx + vector DB |
 | Cursor | — | Editor with server-side embedding index + grep | Proprietary | Chunking | No | Yes | No | No (cloud) | editor |
 | Graft | 8.0k | Graph CLI/MCP: task → ranked nodes + `file:line`; `skeleton` = signatures only; publishes SWE-bench Verified | Yes (`graft ask`, deterministic) | tree-sitter | Symbol graph | No | Optional (`--deep`) | Yes | npm |
+| SnapZip | ~3 | Local codebase memory: SQLite+FTS5 index, task modes, MCP stdio; packs report budget use | Yes (`pack --query --budget`) | lexical + compression distance | Dependency graph | No | No | Yes | local CLI |
 | ContextSlice | — | Task → budget-fitted mixed-granularity slice; persistent index; CLI+MCP | Yes (task-seeded, deterministic) | tree-sitter | File + approx. symbol graph | No (later, optional) | No (later, optional) | Yes | cargo / brew / npx wrapper |
 
 Detailed per-tool analysis is in §2.1 and the research notes embedded in ALGORITHM.md §15

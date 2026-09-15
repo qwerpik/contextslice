@@ -66,11 +66,19 @@ point):
   is a reproducible ablation of a repo-context mechanism on agent task outcomes — exactly
   the artifact the withdrawn claim said did not exist.
 - **SWE-ContextBench** (arXiv 2602.08316): evaluates coding agents under context-reuse
-  strategies and compares **named shipped context tools**, reporting resolution accuracy,
-  runtime and token cost. Its central finding supports our mechanism directly:
-  *"accurately summarized and retrieved previous experience can significantly improve
-  resolution accuracy and reduce runtime and token cost… unfiltered or incorrectly
-  selected context provides limited or negative benefits."*
+  strategies and compares **named shipped context tools — specifically agent *memory*
+  frameworks (Mem0, LangMem, Supermemory, OpenViking), not repository packers**, reporting
+  resolution accuracy, runtime and token cost. Its central finding supports our mechanism
+  directly: *"accurately summarized and retrieved previous experience can significantly
+  improve resolution accuracy and reduce runtime and token cost… unfiltered or incorrectly
+  selected context provides limited or negative benefits."* **Citation constraint:** cite
+  it as evidence that the broader context-management field does token- and
+  cost-normalized outcome benchmarking. It does **not** support "repo packers are
+  benchmarked", and using it that way would be a misread a reviewer could catch.
+- **RepoGraph is the citation to lead with** for this refutation, not a vendor: it is a
+  *repository-context mechanism* ablated on agent outcomes with released code, which is
+  the specific artifact class the withdrawn claim denied. Vendor evidence is weaker and
+  should be presented as such.
 - **ContextBench** (arXiv 2602.05892): public fixed-harness leaderboard carrying Recall,
   **Pass@1**, Context F1 and cost, updated 2026-09-14.
 - **Aider**: a reproducible end-to-end polyglot leaderboard (public harness repo,
@@ -110,10 +118,24 @@ absent from the original landscape table and belongs in it: `graft ask` does
 deterministic, no-LLM, task-conditioned ranking, and `graft skeleton` emits signatures
 only. So *task-conditioned selection* (a) and *mixed granularity* as a capability are not
 unique. What remains defensible is the conjunction: the **budget itself chooses each
-file's level under a hard never-exceed ceiling**. Graft's controls are a result count
-(`--limit`, `--max-dirs`), not a token ceiling, and the level is a manual flag; Repomix's
-levels are glob-configured; Aider's are chat-decided with a soft budget. MASTER_PLAN §2.3
-now states this narrowly and credits Graft by name.
+file's level under a hard never-exceed ceiling**.
+
+There are now **four independent near-misses, each satisfying (a) without (b)**, verified
+2026-09-15:
+
+| Tool | Task-conditioned | Budget-bounded | Granularity chosen by the budget? |
+|---|---|---|---|
+| Aider | yes (chat keywords) | soft ±15%, "Suggested" | no — split decided by chat membership |
+| Graft | yes (`ask`, deterministic) | no — result count (`--limit`, `--max-dirs`) | no — level is a manual flag |
+| Repomix | no | no — errors post-hoc | no — levels are hand-declared config globs |
+| SnapZip (~3★) | yes (`--query --mode`) | reports budget use | no — **no levels at all** (zero README hits for signature/skeleton/granular) and the dominant knob is `--limit` |
+
+SnapZip is the closest match to our *positioning* (local-first CLI, SQLite+FTS5 index,
+task modes, read-only MCP stdio) while still lacking budget-driven granularity, which is
+the fifth independent confirmation of the same gap — and a reminder that the idea is
+being attempted by others, so the differentiation must rest on the mechanism rather than
+on novelty of concept. MASTER_PLAN §2.3 and §4 state this narrowly and credit each tool
+by name.
 
 **6. Most seriously: published evidence contradicts the category's premise, including
 ours.** arXiv 2602.11988 (v2, June 2026, *Evaluating AGENTS.md: Are Repository-Level
@@ -187,3 +209,11 @@ most plausibly toward the benchmark and evaluation data as the moat, which MASTE
 already names as the primary asset. Verification of LemonCrow or SigMap could also reopen
 it. Any such check must be repeated at each release, since every fact in this record is
 about a moving target.
+
+**Search status, stated honestly.** The claim-4 search is not provably exhaustive. Four
+near-misses were verified directly (Aider, Graft, Repomix, SnapZip), one named lead was
+examined and closed (SnapZip), and two tools that a *vendor comparison page* advertises as
+"token-budgeted retrieval" (LemonCrow, SigMap) remain unverified because they were surfaced
+only through marketing. So the correct reading of point 5 is "we could not find a tool that
+does (a)+(b)", **not** "no such tool exists" — which is the same distinction BENCHMARK §7
+now enforces for public claims.
