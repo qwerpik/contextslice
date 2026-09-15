@@ -55,6 +55,19 @@ intrinsic (gold-context recall and precision per token) and extrinsic (agent tas
 per token and cost). No public claim ships without a run behind it, and the benchmark's
 negative-results section is mandatory.
 
+**A published negative result we take seriously.** arXiv 2602.11988 (June 2026) finds
+that repository context files "do not generally improve task success rates, while
+increasing inference cost by over 20% on average", and that *"repository overviews…
+are not helpful"*. That is aimed at the premise of context injection, so it is recorded
+as risk #4 in the master plan with a stop/go consequence rather than argued away. Two
+consequences for how this project talks about itself: we do **not** pitch repository
+overview (map mode is the empty-seed fallback, not the product), and Phase 3's extrinsic
+benchmark is the real go/no-go — if task-conditioned selection shows no success
+improvement at equal tokens, the project pivots to the flows where no agent-improvement
+claim is needed. The study evaluates static overview files, not task-conditioned
+selection of the files a change will touch; that distinction is a hypothesis to test,
+not a rebuttal to cite.
+
 **What is not unique, stated plainly.** Task-conditioned selection is table stakes:
 Aider seeds from chat keywords, and Graft's `graft ask` does deterministic
 task-conditioned ranking with no LLM. Graft also ships signatures-only output
@@ -144,14 +157,16 @@ contradicted the original plan. The interesting ones:
   `<string>value` assertions. The grammar is chosen per extension, and a test pins it.
 - **ADR-014 — `tiktoken-rs` with embedded tables**, so budget estimation and final
   measurement share one code path and stay offline.
-- **ADR-015 — three competitive claims in our own founding documents were wrong.** The
-  claims were checked against competitors' source rather than their documentation, and
-  two of them disagreed: Aider's repo map is 1024–4096 tokens (not "~1k") with a *soft,
-  ±15%* budget and granularity chosen by chat membership, and Graft already ships
-  deterministic task-conditioned selection and signatures-only output. Graft also
-  publishes SWE-bench Verified results, so "nobody publishes agent outcomes" is false.
-  The defensible claim is now narrower — the *budget* choosing each file's level under a
-  hard ceiling — and **claims of absence are forbidden** in any public artifact.
+- **ADR-015 — three competitive claims in our own founding documents were wrong.** They
+  were checked against competitors' source rather than their documentation, and two of
+  them disagreed: Aider's repo map is 1024–4096 tokens (not "~1k") with a *soft, ±15%*
+  budget and granularity chosen by chat membership, and Graft already ships deterministic
+  task-conditioned selection and signatures-only output. The claim that nobody publishes
+  agent-outcome evaluation is **false** and withdrawn — RepoGraph (ICLR 2025) ablates a
+  repo-context module on SWE-bench with released code, SWE-ContextBench compares shipped
+  context tools on resolution rate and cost, ContextBench publishes Pass@1, and Aider has
+  shipped a reproducible leaderboard for years. **Claims of absence are now forbidden** in
+  any public artifact; we assert only what we measure.
 
 ---
 

@@ -96,13 +96,33 @@ this plan was written. Verdict: **the core idea survives, but three assumptions 
    chooses the granularity; the budget does not. uithub truncates by file size.
    Aider's map budget is documented as "Suggested" and accepts a ±15% error, so it can
    exceed its own target.
-   So: nobody fits a budget by *choosing* granularity per file under a hard ceiling —
-   but the real claim ("the agent still succeeds") also requires an extrinsic benchmark,
-   which is where the category is genuinely thin (see BENCHMARK §6 for the one
-   counterexample we found). **Consequence:** the benchmark is a first-class subsystem
+   So: we could not find a tool that fits a budget by *choosing* granularity per file
+   under a hard ceiling. Separately, the claim that "nobody publishes agent-outcome
+   evaluation" is simply **false** and has been withdrawn: RepoGraph (ICLR 2025) ablates a
+   repository-context module on SWE-bench resolver rates with released code,
+   SWE-ContextBench compares named shipped context tools on resolution accuracy and cost,
+   ContextBench publishes a fixed-harness leaderboard with Pass@1, and Aider has shipped a
+   reproducible end-to-end leaderboard for years. What remains true and worth building is
+   narrower: *we* will publish our harness, corpus and logs so our own numbers are
+   checkable. **Consequence:** the benchmark is a first-class subsystem
    (BENCHMARK.md), and every public claim about ContextSlice must trace to a
    reproducible run. This project publishes no claim resting on a competitor's absence:
    the defensible statement is about what *we* measure, not about what others don't.
+
+4. **There is published evidence against the category's core premise, and it is aimed at
+   exactly the kind of artifact we produce.** arXiv 2602.11988 (v2, Jun 2026) evaluates
+   coding agents with and without repository context files and finds that context files
+   *"do not generally improve task success rates, while increasing inference cost by over
+   20% on average"*, across different LLMs, agents, and for both LLM-generated and
+   developer-committed files. Its most pointed finding: *"repository overviews, although
+   popular and recommended by model providers, are not helpful."*
+   **Consequence:** this is recorded as risk #4 in §11, treated as a falsification risk
+   rather than a rebuttal exercise. It removes any legitimacy from an "agents need more
+   repository context" pitch, and it makes phase 3's extrinsic gate the project's actual
+   go/no-go rather than a marketing step. The one honest gap between that study and this
+   product — it measures static overview/instruction files, not task-conditioned selection
+   of the files a change will touch — is a hypothesis for Phase 3 to test, not a citation
+   to hide behind.
 
 ### 2.3 The refined thesis
 
@@ -128,10 +148,12 @@ Honesty about each, as verified 2026-09-15:
   decide each file's level.
 - **(c) is thinner than we assumed.** Graft publishes SWE-bench Verified results
   (official `swebench` grader, n=50), so "nobody publishes agent outcomes" is false. But
-  it removed its harness from the public repo (CHANGELOG v0.7.0), and n=50 detects a
-  12-point effect only ~27% of the time by the paired McNemar power calculation — so
-  *reproducible and adequately powered* remains unclaimed. That is the standard we hold
-  ourselves to in BENCHMARK.md, and it is a harder bar than "nobody does it".
+  it removed its harness from the public repo (CHANGELOG v0.7.0), and its n=50 result is
+  underpowered: our own exact two-sided McNemar computation puts the power to detect a
+  true 12-point effect at n=50 at only **2–6%** (BENCHMARK §4.2). So the published
+  outcome evidence in this category is real but individually weak. That is the standard
+  we hold ourselves to in BENCHMARK.md — *reproducible and adequately powered* — and it
+  is a harder bar than "nobody does it", as well as a more useful one.
 
 ---
 
@@ -392,7 +414,7 @@ skipping.
 | 1 | TypeScript import resolution incompleteness (path aliases, bundler aliases, `index.ts` re-export chains) | Missing edges → missing files in slice | Heuristic resolver with explicit *unresolved-alias* marking and degradation (LANGUAGES §6.2); publish resolution-rate % per corpus; optional ts-morph/SCIP deep mode later |
 | 2 | Approximate refs over/under-linking without type info (overloads, `export *`, Go embedded promotion) | Noise or gaps in propagation | Sqrt-damping on ref counts, bounded hops, container scoping; weights tuned against the intrinsic benchmark, not intuition |
 | 3 | Grammar/query churn (tree-sitter minor breaking releases) | CI breakage, extraction drift | Pinned grammar versions per release (LANGUAGES §9); golden fixtures catch drift early |
-| 4 | "Agents' own search keeps improving" — perceived need shrinks | Product obsolescence | Position as complement (turn/cost saver + one-shot/CI flows); prove quantified turn/token savings in Phase 3; the persistent index and reproducible slices remain valuable independent of agent skill |
+| 4 | **Published evidence that repo-context injection does not help.** arXiv 2602.11988 (v2, Jun 2026) finds that providing context files *"does not generally improve task success rates, while increasing inference cost by over 20% on average"*, across different LLMs and coding agents, and that *"repository overviews, although popular and recommended by model providers, are not helpful"* | **Existential to the premise.** If task-conditioned selection inherits that result, the product has no reason to exist | Treated as a genuine falsification risk, not a positioning problem. Three things follow. (a) **Do not pitch repo overview.** The study discredits static overview material, and ContextSlice's value proposition must rest on delivering the *exact files to edit*, not on orienting the agent. Map mode (§6.1) is the closest thing we have to an overview and is explicitly the fallback, not the product. (b) The study's own conclusion — that performance claims "should be rigorously evaluated before deployment" — is exactly the discipline BENCHMARK.md imposes, so the honest response is to *measure*, not to argue. (c) Phase 3's gate becomes a genuine stop/go: if extrinsic results show no task-success improvement at equal tokens, §7's pivot clause applies to the strongest actual finding — most plausibly CI/review context assembly, where a human reads the artifact and no agent-improvement claim is needed. Note the study evaluates *static context files and overviews*, which is a different intervention from task-conditioned selection of the files a PR will touch; that distinction is a hypothesis to test at Phase 3, **not** a rebuttal to cite. |
 | 5 | Determinism vs. git signals and parallelism | Unreproducible slices, broken property tests | Index snapshot id frozen into slice header; parallel parse then deterministic sort-by-path before persistence; git signals read from the pinned snapshot |
 | 6 | Solo-maintainer scope explosion | Stalled project | Adapter seams + benchmark-first culture let contributors extend without core access; §8.2 guard list; gates between phases |
 | 7 | Benchmark credibility challenged (corpus leakage, agent variance) | Reputational | BENCHMARK.md governance: pinned SHAs, paired stats, published harness/seeds/logs, explicit non-claims |

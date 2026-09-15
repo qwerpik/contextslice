@@ -51,18 +51,49 @@ but that split is decided by **chat membership**, a fixed rule, not by the budge
 Our "hard never-exceed invariant" contrast stands, and is now stated as the specific
 difference rather than implied by a token count.
 
-**3. "Nobody publishes an agent-outcome benchmark" is false.** Graft
-(`trailhq/Graft`, MIT, ~8k★) publishes **SWE-bench Verified** results using the official
-`swebench` 4.1.0 grader at n=50 (+12 pts correctness, +23% tokens). The claim was already
-barred from public artifacts, but it existed in the founding documents and had to go.
-The defensible formulation — and the one BENCHMARK.md now uses — is *reproducible **and**
-adequately powered*, for two verified reasons:
+**3. "Nobody publishes an agent-outcome benchmark" is false — and the counterexamples are
+strong, not marginal.** The first version of this record reached that conclusion from a
+single weak counterexample (Graft: n=50, harness later removed from the public repo).
+A follow-up sweep found a much broader set, and **each of the following was verified
+against its abstract or live site on 2026-09-15** (the follow-up also handed us a power
+figure attributed to a competitor's internal protocol; we did not adopt it, and computed
+the number ourselves instead — see the note on statistical hygiene at the end of this
+point):
 
-- Graft removed its benchmark harness from the public repo (CHANGELOG v0.7.0: "The
-  `bench/` benchmark harness is no longer part of the published repo"), so its
-  controlled sweep is not reproducible from the published tree.
-- n=50 is underpowered. A paired McNemar exact test at α=0.05 detects a true 12-point
-  effect only ~27% of the time. Graft's headline is exactly a 12-point effect at n=50.
+- **RepoGraph** (ICLR 2025, arXiv 2410.14684): a repository-context plug-in module
+  evaluated *"on the SWE-bench by plugging it into four different methods… substantially
+  boosts the performance of all systems"*, with code released and runnable scripts. This
+  is a reproducible ablation of a repo-context mechanism on agent task outcomes — exactly
+  the artifact the withdrawn claim said did not exist.
+- **SWE-ContextBench** (arXiv 2602.08316): evaluates coding agents under context-reuse
+  strategies and compares **named shipped context tools**, reporting resolution accuracy,
+  runtime and token cost. Its central finding supports our mechanism directly:
+  *"accurately summarized and retrieved previous experience can significantly improve
+  resolution accuracy and reduce runtime and token cost… unfiltered or incorrectly
+  selected context provides limited or negative benefits."*
+- **ContextBench** (arXiv 2602.05892): public fixed-harness leaderboard carrying Recall,
+  **Pass@1**, Context F1 and cost, updated 2026-09-14.
+- **Aider**: a reproducible end-to-end polyglot leaderboard (public harness repo,
+  per-run cost, tokens and commit hash) shipped for years. It varies the model and never
+  ablates the repo map — but the artifact exists, which is what the claim denied.
+- **Cursor** (cursor.com/blog/semsearch) reports measured agent-accuracy deltas from
+  semantic search. Not reproducible, but it defeats "nobody *measures* outcomes".
+
+**Statistical hygiene note.** The follow-up report also carried the claim that n=50
+detects a 12-point effect "27% of the time", sourced from another competitor's internal
+protocol document. Rather than adopt a number produced by a third party with an interest
+in the comparison, we computed it: the exact two-sided McNemar power at n=50 for a true
+12-point difference is **2–6%**, depending on the discordant-pair rate, rising only to
+13–37% at n=400 (BENCHMARK §4.2). The direction of the finding survives; the borrowed
+figure did not, and the discrepancy is a reminder that a statistic is only as good as its
+derivation. This is the same rule the benchmark applies to itself: no borrowed numbers.
+
+**The verdict is FALSE as a universal, and the claim is withdrawn rather than reworded
+into something that merely survives.** Any formulation starting "nobody publishes…" is
+now banned by the rule in point 6 below. What we assert instead is only what *we* will
+do: publish our harness, corpus manifests, seeds and per-task logs, so our own numbers
+are checkable. That is a claim about our artifact, which we control, and it cannot be
+falsified by a competitor shipping something tomorrow.
 
 **4. Repomix's budget behaviour needed precision, not correction.** Verified at source
 level (`src/cli/cliTokenBudget.ts`): `--token-budget` is a *post-hoc CI guard*, not a
@@ -83,6 +114,33 @@ file's level under a hard never-exceed ceiling**. Graft's controls are a result 
 (`--limit`, `--max-dirs`), not a token ceiling, and the level is a manual flag; Repomix's
 levels are glob-configured; Aider's are chat-decided with a soft budget. MASTER_PLAN §2.3
 now states this narrowly and credits Graft by name.
+
+**6. Most seriously: published evidence contradicts the category's premise, including
+ours.** arXiv 2602.11988 (v2, June 2026, *Evaluating AGENTS.md: Are Repository-Level
+Context Files Helpful for Coding Agents?*) finds that providing context files *"does not
+generally improve task success rates, while increasing inference cost by over 20% on
+average"* — holding across different LLMs, different coding agents, and for both
+LLM-generated and developer-committed context files. Its sharpest finding: *"while
+instructions in the context files are well followed by coding agents, repository
+overviews, although popular and recommended by model providers, are not helpful."*
+
+This is not a competitive observation; it is a **negative result aimed at the premise**,
+and it is recorded as risk #4 in MASTER_PLAN §11 with a stop/go consequence rather than
+argued away. Three commitments follow:
+
+- **We will not pitch repository overview.** The study discredits static overview
+  material. ContextSlice's claim must rest on delivering the exact files a change will
+  touch. Map mode is the closest thing we ship to an overview, and it is explicitly the
+  fallback for an empty seed set, not the product.
+- **The honest gap is a hypothesis, not a rebuttal.** The study measures static context
+  and instruction files; we select task-conditioned source. That difference is plausible
+  but *untested*, and it may not matter — a well-chosen file set could still fail to move
+  task success. Phase 3's extrinsic gate is therefore the project's real go/no-go, and
+  MASTER_PLAN §7's pivot clause applies if it fails.
+- **The study's own remedy is our existing discipline.** It concludes that performance
+  claims "should be rigorously evaluated before deployment". That is what BENCHMARK.md
+  already mandates, which is the only defensible response available: measure, do not
+  argue.
 
 ## Consequences
 
