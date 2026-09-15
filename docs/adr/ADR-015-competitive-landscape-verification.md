@@ -120,8 +120,48 @@ only. So *task-conditioned selection* (a) and *mixed granularity* as a capabilit
 unique. What remains defensible is the conjunction: the **budget itself chooses each
 file's level under a hard never-exceed ceiling**.
 
-There are now **four independent near-misses, each satisfying (a) without (b)**, verified
-2026-09-15:
+**Correction: (b) is not unoccupied either.** This record first concluded that the
+*conjunction* was the differentiation, because no verified tool made the budget choose
+per-file granularity. A follow-up falsified that. Verified from source on 2026-09-15:
+
+- **`ypollak2/llm-router`** (`code_context.py`, `_build_progressive_context`) sorts symbols
+  by token estimate and, for each, emits full source if it fits and otherwise **falls back
+  to signature-only**. Its module docstring calls this *"progressive disclosure"* and states
+  *"Each layer is added only if the token budget allows."* Per-item, budget-driven,
+  mixed-granularity disclosure in one response — (b) as a shipped capability. Its
+  `signature` is a first-line slice rather than a parsed signature, and its
+  task-conditioning is symbol-name matching rather than ranking, so it is not a full
+  (a)+(b) equivalent.
+- **jCodeMunch** packs under a hard `token_budget` with budget-derived per-item pruning.
+
+So our differentiation must be stated as a **mechanism**, not a capability. llm-router is
+*inclusion-first and greedy*: a level is decided once, when an item is inserted, and never
+revisited, so an item admitted early at full detail is never demoted to make room for a
+more relevant later one. ContextSlice treats the budget as a global allocation problem —
+assign every candidate a level, then demote by gain-per-loss across all files
+(ALGORITHM §8) — which is what makes the invariants expressible: forced seeds never below
+L2, ≥3 files at ≥L2 when any seed exists, and a rendered artifact that never exceeds the
+budget.
+
+**The prevailing convention, in a project's own words.** `Deepjyoti-Sarmah/symbolgraph`
+documents the opposite choice explicitly in `docs/10-context-packing.md` (verified verbatim
+2026-09-15):
+
+> **A too-large entry is skipped, not fatal.** The loop `continue`s. A 900-token function in
+> an 800-token budget doesn't abort the pack or truncate mid-line — it's dropped, and the
+> next (smaller, still relevant) candidate gets its chance. You'd rather have three complete
+> definitions than one severed one.
+
+Its alternatives table rejects "Truncate to fit" ("Half a function is worse than no
+function") and "Return only file paths" ("the agent then reads the files — the cost we're
+removing"). Those are *reasons*, not oversights: skipping is a considered convention here.
+That is the honest framing of our contribution — we argue the binary include/exclude choice
+should become an explicit level ladder, against a convention whose practitioners have
+stated their case. **Do not cite that passage as a criticism of symbolgraph**; it is a
+well-reasoned position.
+
+There remain **four near-misses satisfying (a) without (b)** — evidence the position is
+contested, no longer load-bearing for the differentiation, verified 2026-09-15:
 
 | Tool | Task-conditioned | Budget-bounded | Granularity chosen by the budget? |
 |---|---|---|---|
@@ -129,6 +169,7 @@ There are now **four independent near-misses, each satisfying (a) without (b)**,
 | Graft | yes (`ask`, deterministic) | no — result count (`--limit`, `--max-dirs`) | no — level is a manual flag |
 | Repomix | no | no — errors post-hoc | no — levels are hand-declared config globs |
 | SnapZip (~3★) | yes (`--query --mode`) | reports budget use | no — **no levels at all** (zero README hits for signature/skeleton/granular) and the dominant knob is `--limit` |
+| llm-router (79★) | partial — symbol-name matching | yes (hard `budget_tokens`) | **yes**, but greedy: decided once, never revisited |
 
 SnapZip is the closest match to our *positioning* (local-first CLI, SQLite+FTS5 index,
 task modes, read-only MCP stdio) while still lacking budget-driven granularity, which is
@@ -210,10 +251,16 @@ already names as the primary asset. Verification of LemonCrow or SigMap could al
 it. Any such check must be repeated at each release, since every fact in this record is
 about a moving target.
 
-**Search status, stated honestly.** The claim-4 search is not provably exhaustive. Four
-near-misses were verified directly (Aider, Graft, Repomix, SnapZip), one named lead was
-examined and closed (SnapZip), and two tools that a *vendor comparison page* advertises as
-"token-budgeted retrieval" (LemonCrow, SigMap) remain unverified because they were surfaced
-only through marketing. So the correct reading of point 5 is "we could not find a tool that
-does (a)+(b)", **not** "no such tool exists" — which is the same distinction BENCHMARK §7
-now enforces for public claims.
+**Search status, stated honestly.** The claim-4 search is not provably exhaustive, and the
+follow-up confirmed that discovery was channel-limited (GitHub API and raw fetches only, no
+general web search). Verified directly: Aider, Graft, Repomix, SnapZip and llm-router. Two
+tools advertised as "token-budgeted retrieval" on a *vendor comparison page* (LemonCrow,
+SigMap) remain unverified because they were surfaced only through marketing. **VITAL-RAG**
+(arXiv 2607.26937) reportedly does (a)+(b) with a fixed budget split but has **no code
+release** — recorded as a positioning risk, since it means the capability is both known and
+publishable. Two candidates from the follow-up were rejected on inspection and are recorded
+so they are not re-adopted: `fkenmar/atlas` (its `--focus` takes *paths*, so it is
+task-blind) and `rayhankhilji/jellybean` (its `chooseDetail` is a *global uniform* mode
+switch, not per-file mixing). The correct reading of point 5 is therefore "we could not find
+a tool that does the full (a)+(b) with our invariants", **not** "no such tool exists" —
+the same distinction BENCHMARK §7 enforces for public claims.

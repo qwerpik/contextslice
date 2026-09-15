@@ -135,17 +135,31 @@ task-seeded selection, **(b)** budget *fitting* that chooses per-file granularit
 under a hard never-exceed ceiling, **(c)** published evaluation against gold contexts
 with an intrinsic regression gate in CI.
 
-Honesty about each, as verified 2026-09-15:
+Honesty about each, as verified 2026-09-15 (and revised after a second verification
+pass falsified part of the first draft of this section):
 
 - **(a) is not unique.** Aider seeds from chat keywords; Graft's `graft ask` does
   deterministic task-conditioned ranking with no LLM. Task-seeding is table stakes.
-- **(b) is the real differentiation, and it is narrow.** Graft ships true mixed
-  granularity (`graft skeleton` = signatures only) and a deterministic task→ranked-files
-  path, but its controls are a result **count** (`--limit`, `--max-dirs`), not a token
-  ceiling, and the level is a manual flag. Repomix has per-file levels but glob-configured
-  by hand. Aider mixes full source and skeletons but splits them by *chat membership*, not
-  by budget, and its budget is soft. Nobody we could verify makes the budget itself
-  decide each file's level.
+- **(b) is narrower than we first wrote, and must be stated as a mechanism, not a
+  capability.** An earlier draft said "nobody makes the budget itself decide each file's
+  level". That is **wrong**, and it is corrected here: at least two tools ship
+  budget-driven, per-item mixed granularity. jCodeMunch packs under `token_budget` with
+  budget-derived per-item pruning; more directly, `ypollak2/llm-router` builds a
+  *"progressive disclosure"* context in which each symbol is emitted at full source if it
+  fits and **falls back to signature-only if it does not** (`code_context.py`,
+  `_build_progressive_context`). The capability exists in shipped code.
+  What distinguishes our approach is the *mechanism*, and it is worth being precise:
+  llm-router is **inclusion-first and greedy** — it sorts symbols by size, tries each
+  once, and either takes the full source or a signature *at the moment of insertion*. It
+  never revisits a decision, so a large symbol admitted early is never demoted to make
+  room for a more relevant later one; it simply stops at 90% of budget. Level assignment
+  there is a per-item fallback, not an allocation.
+  ContextSlice treats the budget as a **global allocation problem**: every candidate is
+  assigned a level, then demotion proceeds by *gain-per-loss* across all files
+  (ALGORITHM §8), with invariants no fallback loop can express — forced seeds never drop
+  below L2, at least three files stay at ≥L2 whenever a seed exists, and the rendered
+  artifact never exceeds the budget. That, plus task-conditioned weighting of levels
+  rather than symbol-name matching, is the defensible claim.
 - **(c) is thinner than we assumed, and the honest citation is RepoGraph, not a
   vendor.** "Nobody publishes agent outcomes" is false, and the decisive counterexample
   is **RepoGraph** (ICLR 2025, arXiv 2410.14684): a repository-context module ablated on
