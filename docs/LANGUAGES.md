@@ -135,20 +135,26 @@ from the pre-implementation sketch are recorded in ADR-017.*
   first paragraph only; `//` and `/* */` forms both stripped. Package
   comments are not stored (no def to attach to; nothing downstream needs
   them). Struct-field docs are not extracted (fields are not defs).
-- **Refs, three kinds:** `name_ref` (identifiers in expression position,
+- **Refs, four kinds:** `name_ref` (identifiers in expression position,
   including the package qualifier of `qualified_type`/selector expressions —
   the resolver needs it for import-scoped binding); `field_ref`
-  (field_identifier kept **only** under `selector_expression` — the same
-  node type also spells method/field/interface-method *names*, which are
-  declarations); `type_ref` (type_identifier kept unless in a
-  type_spec/type_alias name position).
+  (field_identifier kept **only** under `selector_expression`, *not* in
+  call position — the same node type also spells method/field/interface-
+  method *names*, which are declarations); `call_ref` (a selector in call
+  position, `x.Foo()`/`pkg.Foo()` — the callee is a method or function,
+  never a data field, so its binding rules differ; ADR-018);
+  `type_ref` (type_identifier kept unless in a type_spec/type_alias name
+  position).
 - **Declaration positions never become refs:** function/param/receiver names
   (incl. `variadic_parameter_declaration`), leading identifier runs of
   var/const specs (top-level and local), type-parameter names, `:=` left
   sides (short vars, if/for init, range clauses with `:=`, type-switch
-  `alias` variables). Local *uses* do remain refs — whether a name is
-  local is scope information beyond syntax; the resolver's sqrt-damped
-  binding absorbs the approximation.
+  `alias` variables), and identifier keys of **struct-shaped** composite
+  literals (`RouteInfo{Handler: x}` names a field; map-literal keys remain
+  references since their type child is a `map_type` — the named-map-type
+  case is a documented loss, ADR-018). Local *uses* do remain refs —
+  whether a name is local is scope information beyond syntax; the
+  resolver's sqrt-damped binding absorbs the approximation.
 - **Universe filter:** references to Go's predeclared identifiers (`int`,
   `error`, `make`, `any`, … full list in `cs-extract/src/go/mod.rs`) are
   dropped — they can never bind to a repository definition and would
@@ -162,14 +168,32 @@ from the pre-implementation sketch are recorded in ADR-017.*
   ancestor is an error node **or** if they fall inside a dropped
   declaration's span (recovery may leave such regions un-`ERROR`-wrapped);
   the file is labeled `partial` with whatever survived cleanly.
-- **Resolution:** map `import path` via `go.mod module` prefix strip →
-  repo-relative dir → package (all `.go` files in dir); relative imports
-  (`./`) resolved directly; stdlib and non-module paths → `External`.
-  Ref→def matching scoped: same-package unqualified names; cross-package
-  `pkg.Name` matched against the imported package's *exported* defs only
-  (the `exported` flag comes from extraction). Optional precision sidecar
-  (`go list -json ./...` + later `go/packages`) behind `--deep=go`, never
-  required.
+- **Resolution (as built, ADR-018):** filesystem-only, no `go list`.
+  Imports resolve through nearest-`go.mod` module mapping: own-module
+  prefix → repo-relative dir (a *directory*: an import binds the package's
+  non-test files); relative `./`/`../` against the importer dir
+  (`EscapesRoot` when it leaves the repo); `vendor/<path>` when vendor
+  exists; dotless first segment → stdlib `External`; else third-party
+  `External`. An import landing in a **different (nested) module's subtree
+  is `External`** even when the path looks in-repo (chi `_examples` trap).
+  Package identity is `(dir, package_name)` — `foo_test` is a different
+  package than `foo`, internal test files share identity but are invisible
+  to importers, and no non-test source ever binds into a test file.
+  Qualifiers come from the alias or the target's **package clause**, never
+  the path tail. Binding: unqualified names/types bind all same-package
+  defs (build-tag variants — gin `codec/json` ships 4); package-qualified
+  selectors bind exported defs, kind-appropriate; bare method calls bind
+  only when unique in the package and not on Go's universal interface
+  surface (`Close`, `ServeHTTP`, … — own unbound reason
+  `universe_method`); bare field accesses and method values never bind
+  (`needs_type_info`). Every unbound ref carries a documented reason,
+  published as a histogram (ARCHITECTURE §4.3). Optional precision sidecar
+  (`go list`/SCIP) stays behind `--deep=go`, never required. Dot/blank
+  import rules are fixture-validated only — zero occurrences in 875
+  real-world import lines (census).
+- **Measured (docs/benchmarks/resolver-gin-chi.md):** in-repo import
+  resolution 100% on gin and chi; sampled binding precision 97.4%/96.9%;
+  resolve ≤ 11 ms per repo.
 - **Hard parts:** embedded/promoted fields and methods (approximate: treat
   promoted methods as defs of the embedded type — labeled
   over-approximation); build-tagged files (index all — extraction is

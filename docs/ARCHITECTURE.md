@@ -146,23 +146,35 @@ beyond reading the index snapshot — this is what makes determinism testable.
 ### 4.3 cs-resolve
 
 - **Purpose:** convert per-file facts into cross-file structure.
-- **Inputs:** `ExtractedFile` stream + repo layout facts (go.mod, tsconfig.json,
-  package.json workspaces, pyproject/setup).
-- **Outputs:** file `edges(src, dst, kind, weight)` where kind ∈ `import_out`,
-  `import_in` (derived reverse), `ref_def` (aggregated per file pair, sqrt-damped
-  weight), `test_affinity`; plus per-ref resolved def id or `unresolved`.
-- **Algorithms/data:** per-language resolvers (LANGUAGES.md §6): Go module-relative
-  paths; TS `paths`/`baseUrl`/`node_modules`/workspace walking with re-export chain
-  following (depth-capped, cycle-safe); Python pyright-style static rules. Approx symbol
-  binding = name match restricted to defs exported/importable from resolved files,
-  scoped by module + container class.
+- **Inputs (as built for Go, ADR-018):** a `ResolveSnapshot` — the extracted
+  files plus module-manifest *contents* (`go.mod` text; the resolver performs
+  zero I/O) — both path-sorted at construction.
+- **Outputs:** per-file `FileResolution` (package identity, import
+  `Resolution`s, per-ref `SymbolBinding`s with documented unbound reasons);
+  file `edges(src, dst, kind, weight)` where kind ∈ `import_out`,
+  `ref_def` (aggregated per file pair, sqrt-damped weight), `test_affinity`
+  (`import_in` remains derived at CSR build time); `ResolutionStats` with an
+  unbound-reason histogram.
+- **API shape:** two-phase — `LanguageResolver::prepare(&snapshot)` builds a
+  repo-level package index once; `resolve(&snapshot)` consumes it. The
+  original one-import-per-call trait could not express directory-packages
+  or repo-wide binding.
+- **Algorithms/data:** per-language (Go as built in LANGUAGES.md §6.1 /
+  ADR-018): nearest-`go.mod` module mapping; package identity
+  `(dir, package_name)`; qualifier scope from aliases and package clauses
+  (never path tails); bind-all for build-tag variants; unique-only bare
+  method binding with a universe-method filter; bare field accesses never
+  bound.
 - **Storage:** none (feeds cs-index).
-- **Performance:** in-memory maps; O(refs × candidate-defs-per-name) worst case, capped
-  by per-name candidate lists (names with >256 candidates are skipped as uninformative —
-  same insight as aider's ">5 files" dampener).
-- **Failure modes:** unresolved alias (marked, counted, published as resolution-rate %);
-  ambiguous name (container scoping, else unresolved); re-export cycles (depth cap 8).
-- **MVP:** yes.
+- **Performance:** in-memory BTree maps; measured gin (99 files) prepare
+  1 ms + resolve 10 ms, chi (84 files) similar — budget < 1 s @ 10k files
+  is untouched. Names with >256 candidates skipped (aider's dampener).
+- **Failure modes:** every degradation is a labeled outcome, not an error:
+  `External` (stdlib/third-party/nested module — correct), `NotFound`,
+  `EscapesRoot`, and per-ref unbound reasons (`no_candidate`,
+  `external_scope`, `no_scope`, `method_ambiguous`, `ambiguous_dot_import`,
+  `needs_type_info`, `universe_method`) surfaced as a histogram.
+- **MVP:** yes (Go; TS/Python follow the same trait shape).
 
 ### 4.4 cs-index
 
@@ -312,7 +324,7 @@ CREATE TABLE imports (
   file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
   raw TEXT NOT NULL,                  -- specifier as written
   alias TEXT,                         -- named alias; '.' dot import; '_' blank import; NULL plain
-  resolved_file_id INTEGER REFERENCES files(id),    -- NULL = external/unresolved
+  resolved_dir TEXT,                          -- package directory (a Go import binds a multi-file package, ADR-018); NULL = external/unresolved
   kind TEXT NOT NULL                  -- import|export-from|require|dynamic...
 );
 

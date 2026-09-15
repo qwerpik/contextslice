@@ -578,6 +578,7 @@ holds. Steps 1–9 are Phase 0+1, steps 10–15 are Phase 2.
 | 015 | Competitive landscape verified; three claims corrected | Verified against competitors' source; budget-fitting is a narrower moat than assumed |
 | 016 | Reconnaissance findings rejected, with reasons and reopen triggers | Rejected findings must stay rejected on the record |
 | 017 | Extraction contract as built: package_name, ref kinds, exported, import aliases, normative degradation policy | Implementing the Go adapter resolved nine open contract questions (ADR-017) |
+| 018 | Go resolver: filesystem-only, package identity (dir, name), unique-only methods + universe-method filter, honest unbound reasons | Every approximation measured on gin/chi before freezing (ADR-018) |
 
 Full records live in [`docs/adr/`](adr/) — see the [ADR index](adr/README.md). ADR-011
 through ADR-016 were produced by the bootstrap verification pass: they record what was
@@ -618,3 +619,38 @@ ARCHITECTURE.md §4.2/§5 updated to match.
 expansion, external marking, then same-package/export-only ref binding).
 Extraction now produces everything the resolver consumes (`package_name`,
 ref kinds, `exported`, import aliases); nothing in extraction blocks it.
+
+### 2026-09-15 — Go resolver complete (step 4 of §15)
+
+**Delivered:** the Go resolver (`cs-resolve/src/go.rs`, ~700 lines) behind
+the reshaped two-phase `LanguageResolver` trait (`prepare`/`resolve`), with
+package identity `(dir, package_name)`, nearest-`go.mod` module mapping
+(nested-module trap handled), qualifier scopes from aliases/package
+clauses (never path tails), bind-all for build-tag variants, unique-only
+bare-method binding, universe-method filter, Go build semantics for test
+files, and a full unbound-reason taxonomy. Extraction amendments in the
+same milestone: `call_ref` (call-position selectors) and struct-shaped
+composite-literal keys as field-name positions — both audit-driven, both
+golden-regenerated and re-reviewed (ADR-018 §7).
+
+**Verified:** 21 fixture-matrix tests (`fixtures/go-resolve/`, 28 files —
+every rule pinned incl. the chi `_examples` trap, 4-way tag duplicates,
+`foo`/`foo_test` isolation, dot/blank/relative/vendor/missing imports);
+edge+stats golden with byte-identical determinism across runs and input
+order; real-repo gates **met** (docs/benchmarks/resolver-gin-chi.md):
+in-repo import resolution 31/31 (gin) and 27/27 (chi) = 100% ≥95%;
+manual precision audit n=315 sampled bindings ≈97.2% ≥95% (Wilson 95% CI
+LB ≈94.7% reported); zero cross-`_test` and zero nested-module binds;
+resolve 10–11 ms per repo (budget <1 s). Two FP classes fixed mid-audit
+(literal keys, universe-method receivers); residual ≈3% (local shadowing,
+cross-package interface names) documented and damped.
+
+**Contract changes:** ADR-018; ARCHITECTURE §4.3 rewritten as-built and
+§5 schema fixed (`imports.resolved_dir` — an import binds a multi-file
+package, not one file); LANGUAGES §6.1 resolution section as-built.
+
+**Next bottleneck:** §15 step 5 — `cs-index` (SQLite schema per
+ARCHITECTURE §5 incl. the resolver's bindings/edges, content-hash
+incremental updates, snapshot ids, FTS5). The resolver now produces
+everything the index persists (`ResolvedRepo` with per-file bindings and
+damped edges); nothing in resolution blocks it.

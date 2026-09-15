@@ -23,6 +23,11 @@
 use cs_scanner::Language;
 use serde::{Deserialize, Serialize};
 
+/// The Go resolver (MASTER_PLAN §15 step 4, ADR-018).
+mod go;
+
+pub use go::GoResolver;
+
 /// A stable file identifier: the file's repo-relative, `/`-separated path.
 ///
 /// The index assigns integer ids, but resolution runs *before* the index exists,
@@ -77,12 +82,15 @@ pub enum UnresolvedReason {
     Malformed,
     /// Resolution would have escaped the repository root.
     EscapesRoot,
+    /// The specifier names a directory that has no Go files (or does not
+    /// exist) — a dangling or wrong-path import (ADR-018).
+    NotFound,
     /// The target exists conceptually but this adapter does not model it yet.
     Unsupported,
 }
 
 /// Cross-file relationship kinds (ARCHITECTURE §5, `edges.kind`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeKind {
     /// `src` imports `dst`.
@@ -148,48 +156,173 @@ pub fn ref_def_weight(count: u64) -> f64 {
     W_REF_DEF * count.sqrt() / (count + REF_DEF_SATURATION).sqrt()
 }
 
-/// The import-resolution and symbol-binding seam (LANGUAGES.md §5).
+/// The import-resolution, symbol-binding and edge-production seam
+/// (LANGUAGES.md §5, ADR-018).
 ///
-/// Adding a language means implementing this trait plus the extraction queries;
-/// nothing in `cs-select`, `cs-render`, `cs-index` or `cs-cli` learns that
-/// languages exist beyond `lang` strings.
-pub trait LanguageResolver {
+/// The original one-call-per-import shape could not work: a Go import
+/// resolves to a *directory of files*, and reference binding needs the whole
+/// repository's definitions. The seam is therefore two-phase: `prepare`
+/// builds a repo-level package index once, `resolve` consumes it per file.
+/// Adding a language means implementing this trait; nothing in `cs-select`,
+/// `cs-render`, `cs-index` or `cs-cli` learns that languages exist beyond
+/// `lang` strings.
+pub trait LanguageResolver: Sized {
     /// The language this resolver handles.
     fn language(&self) -> Language;
 
-    /// Resolve one import specifier written in `from_file`.
-    fn resolve_import(&self, raw: &str, from_file: &FilePath) -> Resolution;
+    /// Build the repo-level index from an extracted snapshot plus any module
+    /// manifests (`go.mod` contents for Go). Pure; no filesystem access.
+    fn prepare(snapshot: &ResolveSnapshot) -> Self;
 
-    /// The module qualifier for a file, used to build qualified names
-    /// (`internal/auth` for `internal/auth/session.go`).
-    fn module_qualifier(&self, file: &FilePath) -> String;
+    /// Resolve imports, bind references and produce file-level edges for the
+    /// whole snapshot. Deterministic: a pure function of the snapshot.
+    fn resolve(&self, snapshot: &ResolveSnapshot) -> ResolvedRepo;
+}
 
-    /// Whether a definition is visible to importers of its file.
-    fn is_exported(&self, def: &cs_extract::Def) -> bool;
+/// Everything the resolver is allowed to know: extracted files plus module
+/// manifests, both sorted by path at construction so downstream ordering is
+/// canonical regardless of caller iteration order (ALGORITHM.md §12).
+#[derive(Debug, Clone, Default)]
+pub struct ResolveSnapshot {
+    /// Extracted files: repo-relative `/`-separated paths.
+    pub files: Vec<(FilePath, cs_extract::ExtractedFile)>,
+    /// Module manifest contents, e.g. `("go.mod", "module example.com/m\n")`.
+    /// Passed in by the caller because the resolver performs zero I/O.
+    pub manifests: Vec<(FilePath, String)>,
+}
 
-    /// The test file paired with a code file, if the language has a convention.
-    fn test_partner(&self, code_file: &FilePath) -> Option<FilePath>;
+impl ResolveSnapshot {
+    /// Construct from unsorted inputs; sorts both lists by path.
+    #[must_use]
+    pub fn new(
+        mut files: Vec<(FilePath, cs_extract::ExtractedFile)>,
+        mut manifests: Vec<(FilePath, String)>,
+    ) -> Self {
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        manifests.sort_by(|a, b| a.0.cmp(&b.0));
+        Self { files, manifests }
+    }
+}
 
-    /// Config files that carry signal S8 (ALGORITHM.md §5).
-    fn config_files(&self) -> Vec<FilePath>;
+/// Where a definition lives, as far as the resolver is concerned.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct DefLoc {
+    /// File containing the definition.
+    pub file: FilePath,
+    /// File-local qualified name (`Session.Validate`).
+    pub qual_name: String,
+    /// Canonical kind, kept so binding rules can be kind-appropriate.
+    pub kind: cs_extract::DefKind,
+}
+
+/// Why a reference stayed unbound. The taxonomy is the honesty contract of
+/// ADR-018: every unbound ref carries a reason, and the reasons are
+/// documented behaviors, not failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnboundReason {
+    /// No def with this name in any reachable scope.
+    NoCandidate,
+    /// The name is used through a package qualifier that resolved outside
+    /// the repository (stdlib/third-party) — nothing to bind to, by design.
+    ExternalScope,
+    /// A selector's operand matched no import qualifier known to the file.
+    NoScope,
+    /// A bare method call whose name is defined on several types in the
+    /// package; receiver type information would be required.
+    MethodAmbiguous,
+    /// Both the file's own package and a dot import define the name; the
+    /// spec-level precedence is not modeled (ADR-018; zero occurrences in
+    /// the gin/chi census).
+    AmbiguousDotImport,
+    /// A bare field access or method value: binding requires the receiver's
+    /// type, which extraction deliberately does not compute.
+    NeedsTypeInfo,
+    /// A bare method call whose name is on Go's universal interface surface
+    /// (`Close`, `ServeHTTP`, `Value`, …): such names collide with stdlib
+    /// methods on almost every receiver type, so binding them by name is
+    /// noise even when the name is unique in the package (the gin/chi audit
+    /// measured this as the dominant FP class; ADR-018).
+    UniverseMethod,
+}
+
+/// The outcome for one reference: zero or more target definitions, or a
+/// documented reason for having none. Multiple targets are legitimate
+/// (build-tag variants of one package define the same names — gin's
+/// `codec/json` ships four; ADR-018).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SymbolBinding {
+    /// Definitions the reference binds to (may be several).
+    pub targets: Vec<DefLoc>,
+    /// Why the reference stayed unbound, when it did.
+    pub unbound_reason: Option<UnboundReason>,
+}
+
+impl SymbolBinding {
+    /// A binding to one or more targets.
+    #[must_use]
+    pub fn bound(targets: Vec<DefLoc>) -> Self {
+        Self {
+            targets,
+            unbound_reason: None,
+        }
+    }
+
+    /// An unbound reference with its documented reason.
+    #[must_use]
+    pub fn unbound(reason: UnboundReason) -> Self {
+        Self {
+            targets: Vec::new(),
+            unbound_reason: Some(reason),
+        }
+    }
+}
+
+/// Per-file resolution results: package identity, import resolutions and
+/// reference bindings, all in source order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileResolution {
+    /// The package this file belongs to: `(dir, package_name)`.
+    pub package: (String, String),
+    /// Imports with their resolutions, in source order.
+    pub imports: Vec<(cs_extract::Import, Resolution)>,
+    /// References with their bindings, in source order.
+    pub refs: Vec<(cs_extract::Ref, SymbolBinding)>,
+}
+
+/// The whole repository's resolution output.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResolvedRepo {
+    /// Per-file results, keyed by path.
+    pub files: std::collections::BTreeMap<FilePath, FileResolution>,
+    /// File-level edges, sorted and deduplicated.
+    pub edges: Vec<Edge>,
+    /// Aggregate outcome statistics.
+    pub stats: ResolutionStats,
 }
 
 /// Tally of resolution outcomes, published as a resolution rate
 /// (LANGUAGES.md §6.2, ARCHITECTURE §11).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ResolutionStats {
-    /// Imports resolved to a file in the repository.
+    /// Imports resolved to a file inside the repository.
     pub resolved: u64,
     /// Imports resolved to something outside the repository.
     pub external: u64,
     /// Imports left unresolved.
     pub unresolved: u64,
-    /// References bound to exactly one definition.
+    /// References bound to at least one definition.
     pub refs_bound: u64,
     /// References left unbound.
     pub refs_unbound: u64,
     /// Names skipped because they had too many candidate definitions.
     pub names_skipped: u64,
+    /// Name refs that were package-qualifier occurrences (`pkg` of
+    /// `pkg.Foo`) — resolved as package references, not definitions.
+    pub package_qualifier_refs: u64,
+    /// Why each unbound reference stayed unbound (ADR-018's honesty
+    /// contract: unbound is a documented behavior with a reason).
+    pub unbound_reasons: std::collections::BTreeMap<UnboundReason, u64>,
 }
 
 impl ResolutionStats {
@@ -200,6 +333,20 @@ impl ResolutionStats {
     #[must_use]
     pub fn import_resolution_rate(&self) -> f64 {
         let total = self.resolved + self.external + self.unresolved;
+        if total == 0 {
+            return 1.0;
+        }
+        self.resolved as f64 / total as f64
+    }
+
+    /// Of the imports that were supposed to resolve inside the repository,
+    /// the fraction that did: `resolved / (resolved + unresolved)`.
+    /// External (stdlib/third-party) is a correct outcome and excluded —
+    /// this is ADR-018 §7's "in-repo import resolution" metric; an empty
+    /// set has no shortfall.
+    #[must_use]
+    pub fn in_repo_import_success_rate(&self) -> f64 {
+        let total = self.resolved + self.unresolved;
         if total == 0 {
             return 1.0;
         }

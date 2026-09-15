@@ -86,50 +86,6 @@
       "container": "TestLogin"
     },
     {
-      "name": "name",
-      "kind": "name_ref",
-      "span": {
-        "start_line": 10,
-        "end_line": 10,
-        "start_byte": 118,
-        "end_byte": 122
-      },
-      "container": "TestLogin"
-    },
-    {
-      "name": "want",
-      "kind": "name_ref",
-      "span": {
-        "start_line": 10,
-        "end_line": 10,
-        "start_byte": 130,
-        "end_byte": 134
-      },
-      "container": "TestLogin"
-    },
-    {
-      "name": "name",
-      "kind": "name_ref",
-      "span": {
-        "start_line": 11,
-        "end_line": 11,
-        "start_byte": 146,
-        "end_byte": 150
-      },
-      "container": "TestLogin"
-    },
-    {
-      "name": "want",
-      "kind": "name_ref",
-      "span": {
-        "start_line": 11,
-        "end_line": 11,
-        "start_byte": 163,
-        "end_byte": 167
-      },
-      "container": "TestLogin"
-    },
-    {
       "name": "cases",
       "kind": "name_ref",
       "span": {
@@ -153,7 +109,7 @@
     },
     {
       "name": "Run",
-      "kind": "field_ref",
+      "kind": "call_ref",
       "span": {
         "start_line": 14,
         "end_line": 14,
@@ -241,7 +197,7 @@
     },
     {
       "name": "Fatal",
-      "kind": "field_ref",
+      "kind": "call_ref",
       "span": {
         "start_line": 16,
         "end_line": 16,
@@ -285,7 +241,7 @@
     },
     {
       "name": "Loop",
-      "kind": "field_ref",
+      "kind": "call_ref",
       "span": {
         "start_line": 27,
         "end_line": 27,

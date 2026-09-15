@@ -15,3 +15,6 @@ bench/corpus/cache/
 *.swp
 .idea/
 .vscode/
+
+# Local agent session state
+.zcode/

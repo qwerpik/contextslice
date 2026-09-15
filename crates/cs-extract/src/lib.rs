@@ -53,7 +53,7 @@ pub struct Span {
 }
 
 /// Canonical symbol kind (ARCHITECTURE §5, `symbols.kind`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DefKind {
     /// A free function.
@@ -155,9 +155,15 @@ pub enum RefKind {
     /// A plain identifier in expression position (`Login`, `pkg` in
     /// `pkg.Call`).
     NameRef,
-    /// A field selection (`Session.UserID`, `pkg.Call` — the part after the
-    /// dot).
+    /// A field selection **not** in call position (`Session.UserID`, the
+    /// method value `f := s.Validate`). The resolver does not bind these
+    /// without receiver type information (ADR-018).
     FieldRef,
+    /// A selection in call position (`s.Validate()`, `pkg.Login()`). Binding
+    /// rules differ from field accesses: the callee is a method or function,
+    /// never a data field — the distinction is made here, where the tree is
+    /// in hand, because the resolver only sees flat refs (ADR-018).
+    CallRef,
     /// A type usage (`*Session`, `map[string]Widget`, `io.Closer` — the name
     /// part).
     TypeRef,
@@ -170,6 +176,7 @@ impl RefKind {
         match self {
             Self::NameRef => "name_ref",
             Self::FieldRef => "field_ref",
+            Self::CallRef => "call_ref",
             Self::TypeRef => "type_ref",
         }
     }

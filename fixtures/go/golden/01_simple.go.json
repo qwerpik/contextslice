@@ -116,7 +116,7 @@
     },
     {
       "name": "New",
-      "kind": "field_ref",
+      "kind": "call_ref",
       "span": {
         "start_line": 19,
         "end_line": 19,

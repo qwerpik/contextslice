@@ -601,7 +601,7 @@ fn collect_refs(
     let mut matches = cursor.matches(query, root, source.as_bytes());
     while let Some(m) = matches.next() {
         for c in m.captures() {
-            let kind = match capture_names[c.index as usize] {
+            let mut kind = match capture_names[c.index as usize] {
                 "ref.name" => RefKind::NameRef,
                 "ref.field" => RefKind::FieldRef,
                 "ref.type" => RefKind::TypeRef,
@@ -634,15 +634,27 @@ fn collect_refs(
                 }
                 // field_identifier also spells method names, struct fields
                 // and interface method elements; only selector fields are
-                // references.
+                // references. Within selectors, call position (`x.Foo()`)
+                // upgrades to CallRef — the resolver binds calls and field
+                // accesses under different rules and cannot see the tree
+                // (ADR-018).
                 RefKind::FieldRef => {
-                    if node
-                        .parent()
-                        .is_none_or(|p| p.kind() != "selector_expression")
-                    {
+                    let parent = node.parent();
+                    let Some(selector) = parent.filter(|p| p.kind() == "selector_expression")
+                    else {
                         continue;
+                    };
+                    let in_call_position = selector.parent().is_some_and(|call| {
+                        call.kind() == "call_expression"
+                            && call.child_by_field_name("function") == Some(selector)
+                    });
+                    if in_call_position {
+                        kind = RefKind::CallRef;
                     }
                 }
+                // CallRef is only produced by the FieldRef arm below, never
+                // by a capture; the arm exists for exhaustiveness.
+                RefKind::CallRef => {}
                 // type_identifier also spells type-spec names (top-level
                 // and local); those positions are declarations. Universe
                 // types (`int`, `error`, …) are dropped for the same reason
@@ -739,6 +751,35 @@ fn declaration_spans(root: Node, source: &str) -> HashSet<(usize, usize)> {
                 collect_direct_identifiers(alias, &mut spans);
             }
         }
+        "keyed_element" => {
+            // Identifier keys of struct-shaped composite literals are
+            // FIELD-NAME positions (`RouteInfo{Handler: x}`), not
+            // references. Map literals keep their keys: their type is a
+            // map_type at any nesting depth (`[]map[string]T{{k: v}}`).
+            // Named map types (`type H map[…]`) are the documented loss.
+            // Measured as the largest FP class in the gin audit (ADR-018).
+            // Walk up through the literal nesting (elements of typed slice
+            // literals add a level) to the owning composite_literal.
+            let mut cursor = node.parent();
+            let mut literal_type = None;
+            while let Some(current) = cursor.filter(|c| {
+                matches!(
+                    c.kind(),
+                    "literal_value" | "keyed_element" | "literal_element" | "composite_literal"
+                )
+            }) {
+                if current.kind() == "composite_literal" {
+                    literal_type = current.child_by_field_name("type");
+                    break;
+                }
+                cursor = current.parent();
+            }
+            if literal_type.is_some_and(is_struct_shaped) {
+                if let Some(key) = node.child_by_field_name("key") {
+                    collect_direct_identifiers(key, &mut spans);
+                }
+            }
+        }
         "short_var_declaration" => collect_left_side_identifiers(node, &mut spans),
         "range_clause" if has_assign_define_token(node, source) => {
             collect_left_side_identifiers(node, &mut spans);
@@ -746,6 +787,20 @@ fn declaration_spans(root: Node, source: &str) -> HashSet<(usize, usize)> {
         _ => {}
     });
     spans
+}
+
+/// Whether a composite-literal type child makes the literal's keys field
+/// names: struct types (named, qualified, generic instantiation, or
+/// anonymous), recursing through slice/array/pointer wrappers. Map types
+/// keep identifier keys as real references.
+fn is_struct_shaped(ty: Node) -> bool {
+    match ty.kind() {
+        "type_identifier" | "qualified_type" | "struct_type" | "generic_type" => true,
+        "slice_type" | "array_type" | "pointer_type" => {
+            ty.named_child(0).is_some_and(is_struct_shaped)
+        }
+        _ => false,
+    }
 }
 
 /// Whether a range clause uses `:=` (declaration) rather than `=` (plain
@@ -956,7 +1011,15 @@ mod tests {
             .filter(|r| r.kind == RefKind::FieldRef)
             .map(|r| r.name.as_str())
             .collect();
-        assert_eq!(field_refs, vec!["Items", "Println", "N"]);
+        // `s.Items()` and `fmt.Println(...)` are calls; `s.N` is a field
+        // access — the only field_ref.
+        assert_eq!(field_refs, vec!["N"]);
+        let call_refs: Vec<&str> = refs
+            .iter()
+            .filter(|r| r.kind == RefKind::CallRef)
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(call_refs, vec!["Items", "Println"]);
         // Struct field N is a declaration position: not even a field ref.
         // S: one usage (the param type); the struct's own name position is
         // a declaration, and `int` is universe (never a ref).
@@ -1015,6 +1078,44 @@ mod tests {
         let refs = extract(src, Language::Go).expect("go").refs;
         let helper_ref = refs.iter().find(|r| r.name == "helper").expect("ref");
         assert_eq!(helper_ref.container.as_deref(), Some("S.M"));
+    }
+
+    #[test]
+    fn call_position_distinguishes_calls_from_method_values() {
+        let src = "package p\n\ntype S struct{ N int }\n\nfunc (s S) Val() int { return 0 }\n\nfunc F(s S) {\n\t_ = s.Val      // method value: field_ref\n\t_ = s.Val()    // call: call_ref\n\t_ = s.N        // field access: field_ref\n\tg()            // plain call: name_ref\n}\n\nfunc g() {}\n";
+        let refs = extract(src, Language::Go).expect("go").refs;
+        let kind_of = |n: &str| {
+            refs.iter()
+                .find(|r| r.name == n)
+                .map_or_else(|| panic!("{n} missing"), |r| r.kind)
+        };
+        // s.Val appears twice with different kinds; find by line.
+        let val_field = refs
+            .iter()
+            .find(|r| r.name == "Val" && r.kind == RefKind::FieldRef)
+            .expect("method value stays a field_ref");
+        assert_eq!(val_field.span.start_line, 8);
+        let val_call = refs
+            .iter()
+            .find(|r| r.name == "Val" && r.kind == RefKind::CallRef)
+            .expect("call upgrades to call_ref");
+        assert_eq!(val_call.span.start_line, 9);
+        assert_eq!(kind_of("N"), RefKind::FieldRef);
+        assert_eq!(kind_of("g"), RefKind::NameRef);
+    }
+
+    #[test]
+    fn package_qualified_calls_are_call_refs() {
+        let src = "package p\n\nimport \"fmt\"\n\nfunc F() {\n\tfmt.Println(\"x\")\n}\n";
+        let refs = extract(src, Language::Go).expect("go").refs;
+        assert_eq!(
+            refs.iter().find(|r| r.name == "Println").unwrap().kind,
+            RefKind::CallRef
+        );
+        assert_eq!(
+            refs.iter().find(|r| r.name == "fmt").unwrap().kind,
+            RefKind::NameRef
+        );
     }
 
     #[test]

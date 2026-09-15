@@ -1,0 +1,17 @@
+{
+  "resolved": 8,
+  "external": 7,
+  "unresolved": 2,
+  "refs_bound": 27,
+  "refs_unbound": 44,
+  "names_skipped": 0,
+  "package_qualifier_refs": 14,
+  "unbound_reasons": {
+    "no_candidate": 30,
+    "external_scope": 7,
+    "method_ambiguous": 2,
+    "ambiguous_dot_import": 1,
+    "needs_type_info": 3,
+    "universe_method": 1
+  }
+}

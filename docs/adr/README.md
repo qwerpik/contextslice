@@ -29,6 +29,7 @@ intact.
 | [015](ADR-015-competitive-landscape-verification.md) | Competitive landscape verified; three claims corrected | Accepted | Bootstrap |
 | [016](ADR-016-rejected-reconnaissance-findings.md) | Reconnaissance findings rejected, and why | Accepted | Bootstrap |
 | [017](ADR-017-extraction-contract-as-built.md) | Extraction contract as built (package, ref kinds, exported, aliases, degradation) | Accepted | Go extraction |
+| [018](ADR-018-go-resolver.md) | Go resolver: filesystem-only, package identity, honest approximation | Accepted | Go resolver |
 
 ## How these were verified
 
