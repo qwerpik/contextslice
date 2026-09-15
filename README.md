@@ -68,7 +68,7 @@ explicit about what exists matters more than looking finished:
 | Area | State |
 |---|---|
 | Cargo workspace, 10 crates (ARCHITECTURE.md §3) | ✅ exists, compiles |
-| `cs-scanner` — traversal, language detection, blake3 hashing | ✅ implemented, 20 tests |
+| `cs-scanner` — traversal, language detection, blake3 hashing | ✅ implemented and tested |
 | `cs-extract` — grammar loading, parse status, fact types | 🟡 grammar layer done and ABI-tested; `.scm` query extraction is step 3 |
 | `cs-resolve` — weight model, resolution types, `LanguageAdapter` seam | 🟡 types and seam defined; per-language resolvers are steps 4/10/11 |
 | `cs-index`, `cs-git`, `cs-select`, `cs-render`, `cs-bench`, `cs-mcp` | ⬜ skeleton (types only) |
