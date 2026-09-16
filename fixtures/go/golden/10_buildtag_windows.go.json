@@ -19,19 +19,9 @@
   ],
   "refs": [
     {
-      "name": "syscall",
-      "kind": "name_ref",
-      "span": {
-        "start_line": 8,
-        "end_line": 8,
-        "start_byte": 122,
-        "end_byte": 129
-      },
-      "container": "Syscall"
-    },
-    {
       "name": "EINVAL",
       "kind": "field_ref",
+      "qualifier": "syscall",
       "span": {
         "start_line": 8,
         "end_line": 8,

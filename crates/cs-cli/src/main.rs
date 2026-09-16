@@ -122,6 +122,9 @@ pub const DEFAULT_TOKEN_BUDGET: usize = 16_000;
 #[derive(Debug, clap::Args)]
 pub struct SliceArgs {
     /// The task text, in natural language. Quoting is recommended.
+    ///
+    /// The sugar form `contextslice "task"` (MASTER_PLAN §6.1) lands with CLI
+    /// polish in step 8; this build requires the explicit `slice` subcommand.
     pub task: String,
 
     /// Token budget; `0` means unlimited.
@@ -226,14 +229,12 @@ pub enum Command {
     Mcp {
         /// Serve over stdio; the only supported transport.
         ///
-        /// Written as a value-taking flag (`--stdio=false`) rather than a bare
-        /// switch, because a bare `bool` with `default_value_t = true` can never
-        /// be turned off — clap switches only ever set `true`, so the option
-        /// would be decorative. SECURITY.md §3 requires stdio to be the sole
-        /// transport, so the meaningful operation is confirming it, and the
-        /// argument exists to make the contract explicit rather than to offer a
-        /// second transport.
-        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        /// A bare switch matching the documented `contextslice mcp [--stdio]`
+        /// form (MASTER_PLAN §6.1). SECURITY.md §3 requires stdio to be the
+        /// sole transport, so the meaningful operation is confirming it, and
+        /// the argument exists to make the contract explicit rather than to
+        /// offer a second transport — there is no value to turn off.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::SetTrue)]
         stdio: bool,
     },
 
@@ -336,20 +337,20 @@ fn run_doctor() {
 
 /// Build a slice.
 ///
-/// The output plumbing is wired end-to-end here — index discovery, artifact
-/// emission through [`write_artifact`], and the stdout/file split — because
-/// those are settled contracts from MASTER_PLAN §6.1. The *content* is not: the
-/// selection and rendering stages are still skeletons, so this emits an explicit
-/// placeholder and reports [`CliError::NotImplemented`] rather than printing
-/// something that looks like a real slice. Emitting an empty or partial artifact
-/// would be worse than failing, because a caller can branch on an exit code but
-/// cannot detect a plausible-looking wrong slice.
+/// The emission contract from MASTER_PLAN §6.1 — **stdout is sacred**, so a
+/// failing command must leave it untouched — is settled. This build's selection
+/// and rendering stages are still skeletons: rather than emitting a placeholder
+/// that a piped consumer could mistake for a slice (a caller can branch on the
+/// exit code but cannot detect a plausible-looking wrong artifact), the command
+/// fails cleanly with [`CliError::NotImplemented`] and writes nothing. Artifact
+/// emission — stdout/`--out` routing and EPIPE-as-success semantics — is
+/// introduced with those stages in MASTER_PLAN §15 steps 6–7.
 ///
 /// # Errors
 ///
 /// Returns [`CliError::NoIndex`] when no index exists, or
 /// [`CliError::NotImplemented`] for the selection stages that are still
-/// skeletons.
+/// skeletons. Neither writes to stdout or `--out`.
 pub fn run_slice(args: &SliceArgs, cwd: &std::path::Path) -> CliResult {
     let index_path = match &args.index {
         Some(path) => path.clone(),
@@ -359,50 +360,11 @@ pub fn run_slice(args: &SliceArgs, cwd: &std::path::Path) -> CliResult {
         return Err(CliError::NoIndex { path: index_path });
     }
 
-    let placeholder = format!(
-        "<!-- contextslice bootstrap: no selection engine in this build -->\n\
-         task: {}\nbudget: {}\n",
-        args.task, args.tokens
-    );
-    if let Err(source) = write_artifact(args.out.as_deref(), &placeholder) {
-        return Err(CliError::Output {
-            target: args.out.clone().unwrap_or_else(|| "<stdout>".to_string()),
-            source,
-        });
-    }
-
     Err(CliError::NotImplemented {
         command: "slice",
         stage: "cs-select + cs-render",
         phase: "MASTER_PLAN §15 steps 6-7",
     })
-}
-
-/// Write the artifact to stdout, or to a file when `--out` names one.
-///
-/// `-` is stdout, matching the usual convention and the `--out <FILE|->` spec.
-///
-/// A closed stdout (`EPIPE`, e.g. `contextslice ... | head`) is treated as
-/// success. It is the normal outcome of a consumer that stopped reading, and
-/// reporting it as an error would break the most common way this tool is used
-/// in a pipeline. The same condition when writing to a *file* is a real failure
-/// and is propagated.
-fn write_artifact(target: Option<&str>, artifact: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    match target {
-        None | Some("-") => {
-            let stdout = std::io::stdout();
-            let mut lock = stdout.lock();
-            match lock
-                .write_all(artifact.as_bytes())
-                .and_then(|()| lock.flush())
-            {
-                Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-                other => other,
-            }
-        }
-        Some(path) => std::fs::write(path, artifact),
-    }
 }
 
 fn main() -> StdExitCode {
@@ -486,18 +448,6 @@ mod tests {
     }
 
     #[test]
-    fn write_artifact_treats_dash_as_stdout() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let target = dir.path().join("out.md");
-        write_artifact(Some(target.to_str().expect("utf8")), "hello\n").expect("write");
-        assert_eq!(std::fs::read_to_string(&target).expect("read"), "hello\n");
-
-        // `-` must not create a file literally named "-" in the cwd.
-        write_artifact(Some("-"), "to stdout\n").expect("write stdout");
-        assert!(!dir.path().join("-").exists());
-    }
-
-    #[test]
     fn version_command_writes_to_stdout_not_stderr() {
         let cli = Cli {
             command: Command::Version,
@@ -543,5 +493,37 @@ mod tests {
         };
         let err = run_slice(&args, dir.path()).expect_err("must fail while skeleton");
         assert_eq!(err.exit_code(), ExitCode::Internal);
+    }
+
+    #[test]
+    fn mcp_stdio_accepts_the_documented_bare_flag() {
+        // `contextslice mcp [--stdio]` (MASTER_PLAN §6.1): the flag form must
+        // parse. A previous configuration (ArgAction::Set + default) rejected
+        // it with a usage error.
+        let cli = Cli::try_parse_from(["contextslice", "mcp", "--stdio"])
+            .expect("bare --stdio must parse");
+        assert!(matches!(cli.command, Command::Mcp { stdio: true }));
+    }
+
+    #[test]
+    fn failing_slice_writes_no_artifact() {
+        // "stdout is sacred" (MASTER_PLAN §6.1): a command that fails must not
+        // leave an artifact behind, whether stdout or --out.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join(INDEX_DIR)).expect("mkdir");
+        let out = dir.path().join("slice.md");
+        let args = SliceArgs {
+            task: "fix the auth timeout".to_string(),
+            tokens: DEFAULT_TOKEN_BUDGET,
+            format: Format::Markdown,
+            out: Some(out.to_str().expect("utf8").to_string()),
+            include: Vec::new(),
+            explain: false,
+            no_git: false,
+            index: None,
+        };
+        let err = run_slice(&args, dir.path()).expect_err("skeleton stage fails");
+        assert_eq!(err.exit_code(), ExitCode::Internal);
+        assert!(!out.exists(), "a failed slice must not write the artifact");
     }
 }

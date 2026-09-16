@@ -13,6 +13,11 @@ func Exercise() {
 	v := c.Check // method value: needs_type_info
 	_ = s.Field // field access: needs_type_info
 	_ = f.Close() // unique but universe name: unbound(universe_method)
+	_ = Make().Solo() // chained through a computed operand: no_scope
+	d := D{}
+	_ = d.Solo() // identifier operand, unique: binds to D.Solo
+	_ = t.Run("x", nil) // unknown receiver + testing-surface name: universe_method
 	_ = v
 	_ = f
+	_ = d
 }

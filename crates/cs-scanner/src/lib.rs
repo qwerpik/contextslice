@@ -6,11 +6,12 @@
 //!
 //! # Determinism
 //!
-//! The walker runs in parallel, so raw discovery order is unspecified. The
-//! contract in ARCHITECTURE.md §7 is that parallel work is *order-normalized
-//! before any persisting decision*: this crate sorts by path before hashing and
-//! returns results in that order, so two runs over the same tree produce
-//! byte-identical output regardless of how the OS scheduled the walk.
+//! The walk is single-threaded and entries are sorted by their normalized
+//! `/`-separated path string before any decision is made, so two runs over the
+//! same tree produce byte-identical output (ARCHITECTURE §7: order-normalize
+//! before any persisting decision). Data parallelism, if the cold-index budget
+//! ever demands it, belongs to the index stage and must reuse the same
+//! sort-before-persist rule.
 //!
 //! # Not a security boundary
 //!
@@ -25,14 +26,19 @@ mod lang;
 
 pub use lang::{detect_language, Language};
 
+use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 /// Default per-file parse cap (ARCHITECTURE §4.1): files larger than this are
-/// listed in the index but never parsed.
+/// listed and hashed, but never parsed.
 pub const DEFAULT_PARSE_CAP: u64 = 1024 * 1024;
+
+/// Default per-file read cap (ARCHITECTURE §4.1): files larger than this are
+/// listed with their size but never read at all, so they carry no hash.
+pub const DEFAULT_READ_CAP: u64 = 50 * 1024 * 1024;
 
 /// Default total-bytes cap for a single index run (SECURITY.md §6).
 pub const DEFAULT_TOTAL_BYTES_CAP: u64 = 2 * 1024 * 1024 * 1024;
@@ -40,15 +46,20 @@ pub const DEFAULT_TOTAL_BYTES_CAP: u64 = 2 * 1024 * 1024 * 1024;
 /// Default total-file cap for a single index run (SECURITY.md §6).
 pub const DEFAULT_TOTAL_FILES_CAP: u64 = 500_000;
 
-/// Why a file was listed but not hashed.
+/// Why a file carries no hash, or is excluded from parsing.
 ///
-/// A [`ScannedFile`] with `hash: None` carries one of these; it is a *labeled*
-/// degradation, never a silent skip (ARCHITECTURE §2.3).
+/// Every degradation is *labeled*, never silent (ARCHITECTURE §2.3); the
+/// reason travels in [`ScannedFile::skip`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
-    /// Larger than the configured parse cap; listed, never parsed.
+    /// Larger than the configured read cap: listed with its size, never read,
+    /// therefore never hashed and never parsed.
     TooLarge,
+    /// Larger than the parse cap but within the read cap: hashed for
+    /// change detection, never parsed (ARCHITECTURE §4.1's 1 MiB–50 MiB
+    /// band — the hash keys incremental indexing even without extraction).
+    ParseSkipped,
     /// The file could not be read (permissions, race, I/O error).
     Unreadable,
 }
@@ -65,6 +76,9 @@ pub struct ScannedFile {
     pub lang: Language,
     /// Size in bytes, as reported by the filesystem.
     pub size: u64,
+    /// Modification time as seconds since the Unix epoch; `0` when the
+    /// filesystem does not report one (ARCHITECTURE §5, `files.mtime`).
+    pub mtime: i64,
     /// blake3 content hash, or `None` when the file was listed but not read.
     pub hash: Option<[u8; 32]>,
     /// Why the file was not hashed, when `hash` is `None`.
@@ -74,8 +88,10 @@ pub struct ScannedFile {
 /// Scanner configuration.
 #[derive(Debug, Clone)]
 pub struct ScanConfig {
-    /// Files above this size are listed but not hashed or parsed.
+    /// Files above this size are hashed but never parsed.
     pub parse_cap: u64,
+    /// Files above this size are listed but never read (no hash).
+    pub read_cap: u64,
     /// Hard cap on files per run; exceeding it is an error, not a truncation.
     pub max_files: u64,
     /// Hard cap on total bytes considered per run.
@@ -88,6 +104,7 @@ impl Default for ScanConfig {
     fn default() -> Self {
         Self {
             parse_cap: DEFAULT_PARSE_CAP,
+            read_cap: DEFAULT_READ_CAP,
             max_files: DEFAULT_TOTAL_FILES_CAP,
             max_total_bytes: DEFAULT_TOTAL_BYTES_CAP,
             extra_ignore_files: Vec::new(),
@@ -129,16 +146,32 @@ pub enum ScanError {
     },
 }
 
-/// Walk `root` and return every included file, sorted by path.
+/// One discovered file, before hashing: the path, the normalized sort key,
+/// and the single stat this crate takes per file.
+struct Discovered {
+    path: PathBuf,
+    /// The `/`-separated normalized path; the sort key everywhere downstream.
+    key: String,
+    size: u64,
+    mtime: i64,
+}
+
+/// Walk `root` and return every included file, sorted by normalized path.
 ///
 /// The walk honours `.gitignore`, `.ignore`, and `.contextsliceignore` (plus any
-/// names in [`ScanConfig::extra_ignore_files`]), and never follows symlinks.
+/// names in [`ScanConfig::extra_ignore_files`]) whether or not a `.git`
+/// directory exists (`require_git(false)`: extracted tarballs and archives get
+/// the same ignore semantics as checkouts), never follows symlinks, and never
+/// descends into `.git/` (credential-bearing internals that must never reach
+/// the index, SECURITY.md §7/§8) or a `.contextslice/` index directory.
 ///
 /// # Errors
 ///
 /// Returns [`ScanError::BadRoot`] if `root` is not a readable directory,
 /// [`ScanError::Walk`] for fatal walk failures, and [`ScanError::CapExceeded`]
-/// if the tree exceeds the configured file or byte caps.
+/// if the tree exceeds the configured file or byte caps. Caps are enforced
+/// *during* the walk — an adversarial tree terminates the moment a cap trips,
+/// not after being fully discovered.
 pub fn scan(root: &Path, config: &ScanConfig) -> Result<Vec<ScannedFile>, ScanError> {
     if !root.is_dir() {
         return Err(ScanError::BadRoot {
@@ -146,37 +179,18 @@ pub fn scan(root: &Path, config: &ScanConfig) -> Result<Vec<ScannedFile>, ScanEr
         });
     }
 
-    // Phase 1: discover relative paths (parallel, unordered).
-    let (mut relative, total_bytes) = discover(root, config)?;
+    // Phase 1: discover (statting each file exactly once) and hash in the
+    // normalized order. Caps abort the walk itself.
+    let discovered = discover(root, config)?;
 
-    // Phase 2: order-normalize before any further work. ARCHITECTURE §7 requires
-    // parallel results to be sorted before any persisting decision; this sort is
-    // what makes the whole pipeline reproducible.
-    relative.sort_unstable();
-
-    if relative.len() as u64 > config.max_files {
-        return Err(ScanError::CapExceeded {
-            unit: "file",
-            limit: config.max_files,
-            seen: relative.len() as u64,
-        });
-    }
-    if total_bytes > config.max_total_bytes {
-        return Err(ScanError::CapExceeded {
-            unit: "byte",
-            limit: config.max_total_bytes,
-            seen: total_bytes,
-        });
-    }
-
-    // Phase 3: hash each file, in the now-stable order.
-    Ok(relative
+    // Phase 2: hash each file, in the now-stable order.
+    Ok(discovered
         .into_iter()
-        .map(|rel| inspect(root, &rel, config))
+        .map(|rec| inspect(root, rec, config))
         .collect())
 }
 
-/// Walk the tree and collect repo-relative paths plus the total byte count.
+/// Walk the tree and collect one stat per file: path, size, mtime.
 ///
 /// Per-entry failures are labeled degradations, not fatal: an unreadable
 /// subdirectory or a dangling symlink is skipped with a debug log. The single
@@ -191,7 +205,7 @@ pub fn scan(root: &Path, config: &ScanConfig) -> Result<Vec<ScannedFile>, ScanEr
 /// established by probing the walker's error shape, because the obvious
 /// implementation — treating a shallow-depth error as a root error — is wrong:
 /// an unreadable *subdirectory* also reports depth 1.
-fn discover(root: &Path, config: &ScanConfig) -> Result<(Vec<PathBuf>, u64), ScanError> {
+fn discover(root: &Path, config: &ScanConfig) -> Result<Vec<Discovered>, ScanError> {
     let mut builder = ignore::WalkBuilder::new(root);
     builder
         .hidden(false) // include dotfiles; .gitignore governs instead
@@ -199,14 +213,25 @@ fn discover(root: &Path, config: &ScanConfig) -> Result<(Vec<PathBuf>, u64), Sca
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
+        .require_git(false) // ignore files govern even without a .git dir
         .follow_links(false); // symlink loops are impossible, not merely detected
+
+    // `.git` must never be indexed: with `hidden(false)` the walker would
+    // otherwise traverse it (332 of this repository's own 475 files were
+    // `.git` internals before this filter existed), exposing `.git/config`
+    // credentials and reflogs (SECURITY.md §7/§8). `.contextslice` is this
+    // tool's own index directory. `.github` and other dotfiles stay included.
+    builder.filter_entry(|entry| {
+        let name = entry.file_name();
+        name != OsStr::new(".git") && name != OsStr::new(".contextslice")
+    });
 
     builder.add_custom_ignore_filename(".contextsliceignore");
     for name in &config.extra_ignore_files {
         builder.add_custom_ignore_filename(name);
     }
 
-    let mut relative: Vec<PathBuf> = Vec::new();
+    let mut discovered: Vec<Discovered> = Vec::new();
     let mut total_bytes: u64 = 0;
     let mut root_error: Option<ignore::Error> = None;
 
@@ -245,16 +270,39 @@ fn discover(root: &Path, config: &ScanConfig) -> Result<(Vec<PathBuf>, u64), Sca
         if !file_type.is_file() {
             continue; // directories, sockets, fifos, symlinks: never indexed
         }
-        match entry.metadata() {
-            Ok(metadata) => total_bytes = total_bytes.saturating_add(metadata.len()),
+        let Some(rel) = normalize_relative(root, entry.path()) else {
+            continue;
+        };
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
             Err(err) => {
                 tracing::debug!(path = %entry.path().display(), error = %err, "skipping unstatable entry");
                 continue;
             }
+        };
+        total_bytes = total_bytes.saturating_add(metadata.len());
+        // Caps abort the walk in place (dropping the iterator stops traversal):
+        // an adversarial tree must not be fully discovered before tripping.
+        if discovered.len() + 1 > usize::try_from(config.max_files).unwrap_or(usize::MAX) {
+            return Err(ScanError::CapExceeded {
+                unit: "file",
+                limit: config.max_files,
+                seen: config.max_files + 1,
+            });
         }
-        if let Some(rel) = normalize_relative(root, entry.path()) {
-            relative.push(rel);
+        if total_bytes > config.max_total_bytes {
+            return Err(ScanError::CapExceeded {
+                unit: "byte",
+                limit: config.max_total_bytes,
+                seen: total_bytes,
+            });
         }
+        discovered.push(Discovered {
+            key: to_slash(&rel),
+            path: rel,
+            size: metadata.len(),
+            mtime: mtime_secs(&metadata),
+        });
     }
 
     if let Some(source) = root_error {
@@ -264,7 +312,23 @@ fn discover(root: &Path, config: &ScanConfig) -> Result<(Vec<PathBuf>, u64), Sca
         });
     }
 
-    Ok((relative, total_bytes))
+    // ARCHITECTURE §7: order-normalize before any persisting decision. The
+    // sort key is the normalized path *string* — `PathBuf` ordering compares
+    // components and disagrees with string order (`a-b/x.go` vs `a/x.go`),
+    // while every downstream consumer (index keys, goldens) sorts strings.
+    discovered.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+    Ok(discovered)
+}
+
+/// Modification time in seconds since the Unix epoch; `0` when unavailable
+/// (pre-epoch clocks and exotic filesystems degrade instead of failing).
+fn mtime_secs(metadata: &std::fs::Metadata) -> i64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|d| i64::try_from(d.as_secs()).ok())
+        .unwrap_or(0)
 }
 
 /// Whether a walk error refers to the repository root rather than a descendant.
@@ -292,42 +356,36 @@ fn error_path(err: &ignore::Error) -> Option<&Path> {
     }
 }
 
-/// Read one discovered file and produce its [`ScannedFile`] record.
+/// Hash a discovered file and produce its [`ScannedFile`] record.
 ///
-/// Size is taken once, here, and is the size that keys every later decision.
-/// Reading it in two places previously let a file report `size: 0` while also
-/// being flagged `TooLarge`, which would have poisoned map-mode token estimates
-/// (ARCHITECTURE §5).
-fn inspect(root: &Path, rel: &Path, config: &ScanConfig) -> ScannedFile {
-    let abs = root.join(rel);
-    let path = to_slash(rel);
-    let lang = detect_language(&path);
+/// The record carries the size and mtime from discovery — the values that keyed
+/// every cap decision — rather than re-statting (and possibly observing a file
+/// that changed in between). A file that grew past a cap *after* discovery is
+/// hashed as discovered; the next run's hash diff catches it.
+fn inspect(root: &Path, rec: Discovered, config: &ScanConfig) -> ScannedFile {
+    let abs = root.join(&rec.path);
+    let lang = detect_language(&rec.key);
 
-    let (size, hash, skip) = match std::fs::metadata(&abs) {
-        Ok(metadata) => {
-            let size = metadata.len();
-            if size > config.parse_cap {
-                (size, None, Some(SkipReason::TooLarge))
-            } else {
-                match hash_file(&abs) {
-                    Ok(hash) => (size, Some(hash), None),
-                    Err(err) => {
-                        tracing::debug!(path = %abs.display(), error = %err, "file unreadable");
-                        (size, None, Some(SkipReason::Unreadable))
-                    }
-                }
+    let (hash, skip) = if rec.size > config.read_cap {
+        (None, Some(SkipReason::TooLarge))
+    } else {
+        match hash_file(&abs) {
+            Ok(hash) => {
+                let skip = (rec.size > config.parse_cap).then_some(SkipReason::ParseSkipped);
+                (Some(hash), skip)
             }
-        }
-        Err(err) => {
-            tracing::debug!(path = %abs.display(), error = %err, "file vanished during scan");
-            (0, None, Some(SkipReason::Unreadable))
+            Err(err) => {
+                tracing::debug!(path = %abs.display(), error = %err, "file unreadable");
+                (None, Some(SkipReason::Unreadable))
+            }
         }
     };
 
     ScannedFile {
-        path,
+        path: rec.key,
         lang,
-        size,
+        size: rec.size,
+        mtime: rec.mtime,
         hash,
         skip,
     }
@@ -398,15 +456,38 @@ mod tests {
     }
 
     #[test]
-    fn returns_files_sorted_by_path() {
+    fn returns_files_sorted_by_normalized_path_string() {
         let dir = tempfile::tempdir().expect("tempdir");
         write(dir.path(), "b.go", "package b\n");
         write(dir.path(), "a.go", "package a\n");
         write(dir.path(), "nested/c.ts", "export {}\n");
+        // PathBuf component order and string order disagree here ('-' < '/'):
+        // string order must win, because index keys are TEXT.
+        write(dir.path(), "a-b/x.go", "package x\n");
 
         let files = scan(dir.path(), &ScanConfig::default()).expect("scan");
         let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
-        assert_eq!(paths, vec!["a.go", "b.go", "nested/c.ts"]);
+        assert_eq!(paths, vec!["a-b/x.go", "a.go", "b.go", "nested/c.ts"]);
+    }
+
+    #[test]
+    fn git_and_index_directories_are_never_scanned() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(dir.path(), "kept.go", "package kept\n");
+        write(
+            dir.path(),
+            ".git/config",
+            "[remote \"origin\"]\n url = token\n",
+        );
+        write(dir.path(), ".git/objects/ab/cdef", "loose object");
+        write(dir.path(), ".git/refs/heads/main", "0000000\n");
+        write(dir.path(), ".contextslice/index.db", "not source\n");
+        // Dotdirs that are not .git stay included.
+        write(dir.path(), ".github/workflows/ci.yml", "name: CI\n");
+
+        let files = scan(dir.path(), &ScanConfig::default()).expect("scan");
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec![".github/workflows/ci.yml", "kept.go"]);
     }
 
     #[test]
@@ -436,6 +517,21 @@ mod tests {
     }
 
     #[test]
+    fn records_mtime_and_size_from_discovery() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(dir.path(), "main.go", "package main\n");
+
+        let files = scan(dir.path(), &ScanConfig::default()).expect("scan");
+        assert_eq!(files.len(), 1);
+        assert!(
+            files[0].mtime > 1_600_000_000,
+            "mtime should be a plausible unix timestamp, got {}",
+            files[0].mtime
+        );
+        assert_eq!(files[0].size, "package main\n".len() as u64);
+    }
+
+    #[test]
     fn same_content_hashes_identically_and_differs_otherwise() {
         let one = tempfile::tempdir().expect("tempdir");
         let two = tempfile::tempdir().expect("tempdir");
@@ -450,17 +546,14 @@ mod tests {
     }
 
     #[test]
-    fn honors_gitignore() {
+    fn gitignore_is_honored_without_a_git_directory() {
         let dir = tempfile::tempdir().expect("tempdir");
         write(dir.path(), ".gitignore", "ignored/\n*.log\n");
         write(dir.path(), "kept.go", "package kept\n");
         write(dir.path(), "ignored/dropped.go", "package dropped\n");
         write(dir.path(), "debug.log", "noise\n");
-
-        // `require_git(false)` semantics: our builder enables git_ignore, and the
-        // `ignore` crate applies .gitignore when the path has a git dir. Force it
-        // by creating one, so this test asserts the contract rather than luck.
-        std::fs::create_dir_all(dir.path().join(".git")).expect("fake git dir");
+        // Deliberately NO .git directory: extracted tarballs and CI archives
+        // must get the same ignore semantics as checkouts (require_git(false)).
 
         let files = scan(dir.path(), &ScanConfig::default()).expect("scan");
         let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
@@ -476,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn oversize_file_is_listed_but_not_hashed() {
+    fn parse_skipped_band_is_hashed_but_labeled() {
         let dir = tempfile::tempdir().expect("tempdir");
         write(dir.path(), "big.go", &"a".repeat(4096));
         let config = ScanConfig {
@@ -486,9 +579,47 @@ mod tests {
 
         let files = scan(dir.path(), &config).expect("scan");
         assert_eq!(files.len(), 1);
+        // Within the read cap: the hash exists (incrementality needs it) even
+        // though the file will never be parsed (ARCHITECTURE §4.1).
+        assert_eq!(files[0].skip, Some(SkipReason::ParseSkipped));
+        assert!(
+            files[0].hash.is_some(),
+            "parse-skipped files must still be hashed"
+        );
+        assert_eq!(files[0].size, 4096);
+    }
+
+    #[test]
+    fn over_read_cap_files_are_listed_but_never_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(dir.path(), "big.go", &"a".repeat(4096));
+        let config = ScanConfig {
+            read_cap: 16,
+            ..ScanConfig::default()
+        };
+
+        let files = scan(dir.path(), &config).expect("scan");
+        assert_eq!(files.len(), 1);
         assert_eq!(files[0].skip, Some(SkipReason::TooLarge));
         assert_eq!(files[0].hash, None);
         assert_eq!(files[0].size, 4096);
+    }
+
+    #[test]
+    fn scan_is_deterministic_across_runs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(dir.path(), "b/x.go", "package b\n");
+        write(dir.path(), "a.go", "package a\n");
+
+        let render = |files: &[ScannedFile]| {
+            files
+                .iter()
+                .map(|f| format!("{} {:?} {} {}", f.path, f.lang, f.size, f.mtime))
+                .collect::<Vec<_>>()
+        };
+        let first = render(&scan(dir.path(), &ScanConfig::default()).expect("scan"));
+        let second = render(&scan(dir.path(), &ScanConfig::default()).expect("scan"));
+        assert_eq!(first, second);
     }
 
     #[test]
@@ -515,7 +646,7 @@ mod tests {
             ScanError::CapExceeded { unit, limit, seen } => {
                 assert_eq!(unit, "file");
                 assert_eq!(limit, 1);
-                assert_eq!(seen, 2);
+                assert!(seen > limit, "seen must exceed the limit");
             }
             other => panic!("expected CapExceeded, got {other:?}"),
         }

@@ -107,8 +107,10 @@ cs-index, or cs-cli knows a language exists beyond `lang` strings.
 
 ### 6.1 Go
 
-*Implemented (2026-09-15); this section is the as-built contract. Deviations
-from the pre-implementation sketch are recorded in ADR-017.*
+*Implemented (2026-09-15; recovery pass 2026-09-16); this section is the
+as-built contract. Deviations from the pre-implementation sketch are
+recorded in ADR-017; the qualifier contract in ADR-020; the recovery-pass
+fixes and measurements in ADR-019.*
 
 - **Extraction output:** `package_name` from the package clause (needed by the
   resolver for same-package scoping; `None` for empty/broken files); defs,
@@ -135,39 +137,61 @@ from the pre-implementation sketch are recorded in ADR-017.*
   first paragraph only; `//` and `/* */` forms both stripped. Package
   comments are not stored (no def to attach to; nothing downstream needs
   them). Struct-field docs are not extracted (fields are not defs).
-- **Refs, four kinds:** `name_ref` (identifiers in expression position,
-  including the package qualifier of `qualified_type`/selector expressions —
-  the resolver needs it for import-scoped binding); `field_ref`
-  (field_identifier kept **only** under `selector_expression`, *not* in
-  call position — the same node type also spells method/field/interface-
-  method *names*, which are declarations); `call_ref` (a selector in call
-  position, `x.Foo()`/`pkg.Foo()` — the callee is a method or function,
-  never a data field, so its binding rules differ; ADR-018);
-  `type_ref` (type_identifier kept unless in a type_spec/type_alias name
-  position).
+- **Refs, four kinds plus the structural qualifier (ADR-020):** `name_ref`
+  (identifiers in expression position); `field_ref` (field_identifier kept
+  **only** under `selector_expression`, *not* in call position — the same
+  node type also spells method/field/interface-method *names*, which are
+  declarations); `call_ref` (a selector in call position,
+  `x.Foo()`/`pkg.Foo()` — the callee is a method or function, never a data
+  field, so its binding rules differ; ADR-018; generic instantiation calls
+  `pkg.F[T]()` are `call_ref` too); `type_ref` (type_identifier kept unless
+  in a type_spec/type_alias name position). Every selector-carrying ref also
+  records its **`qualifier`**: the operand identifier's text when the
+  operand is a plain identifier (`auth` of `auth.Session`), `None` when
+  there is no selector or the operand is a computed expression
+  (`w.Header().Add`). The operand occurrence itself is **suppressed** —
+  receivers and qualifiers are scope structure, not name uses; a selector
+  with `Some(q)` and one with `None` are the identifier/expression
+  distinction, and the resolver never re-derives selector relationships from
+  byte adjacency.
 - **Declaration positions never become refs:** function/param/receiver names
   (incl. `variadic_parameter_declaration`), leading identifier runs of
-  var/const specs (top-level and local), type-parameter names, `:=` left
-  sides (short vars, if/for init, range clauses with `:=`, type-switch
-  `alias` variables), and identifier keys of **struct-shaped** composite
-  literals (`RouteInfo{Handler: x}` names a field; map-literal keys remain
-  references since their type child is a `map_type` — the named-map-type
-  case is a documented loss, ADR-018). Local *uses* do remain refs —
-  whether a name is local is scope information beyond syntax; the
-  resolver's sqrt-damped binding absorbs the approximation.
-- **Universe filter:** references to Go's predeclared identifiers (`int`,
-  `error`, `make`, `any`, … full list in `cs-extract/src/go/mod.rs`) are
-  dropped — they can never bind to a repository definition and would
-  otherwise dominate the refs table. The blank identifier `_` likewise
-  never appears.
-- **Imports:** raw path with quotes stripped; `alias` as written — named
-  (`f`), dot (`.`), blank (`_`) imports all recorded; Go has only the
-  static `Import` kind.
+  var/const specs (top-level and local), type-parameter names, `:=` **left
+  sides only** (short vars, if/for init, range clauses with `:=`,
+  type-switch `alias` variables — right-hand uses remain refs), and
+  identifier keys of **struct-shaped** composite literals (`RouteInfo{Handler: x}`
+  names a field; map-literal keys remain references since their type child
+  is a `map_type` — the named-map-type case is a documented loss, ADR-018;
+  typeless nested literals are plain `literal_value` in the grammar, so
+  their keys resolve to the owning typed literal and do not leak — ADR-019).
+  Local *uses* do remain refs — whether a name is local is scope information
+  beyond syntax; the resolver's sqrt-damped binding absorbs the
+  approximation.
+- **Universe filter:** references to Go's **44 predeclared identifiers**
+  (`append`, `any`, `bool`, … — the complete set: universe types, builtins
+  and constants; `f32`/`f64` are *not* predeclared and are not on the list)
+  are dropped at extraction — they can never bind to a repository
+  definition and would otherwise dominate the refs table. The list lives in
+  `cs-extract/src/go/mod.rs`, **strictly sorted** so `is_universe` can
+  binary-search it, with a unit test pinning both the sortedness and the
+  count. The blank identifier `_` likewise never appears.
+- **Imports:** raw path with quotes stripped — interpreted **and raw-string**
+  (backtick) literals both captured; `alias` as written — named (`f`), dot
+  (`.`), blank (`_`) imports all recorded; Go has only the static `Import`
+  kind.
+- **Doc adjacency survives `//go:` build directives:** a comment block is
+  still the declaration's doc when the only lines between it and the
+  declaration are `//go:` directive lines (the gap scan is O(gap), not
+  O(file) — measured, ADR-019 §D).
 - **Degradation policy (normative):** a def survives a partial file only if
   its declaration subtree contains no error node; refs are dropped if any
   ancestor is an error node **or** if they fall inside a dropped
   declaration's span (recovery may leave such regions un-`ERROR`-wrapped);
-  the file is labeled `partial` with whatever survived cleanly.
+  the file is labeled `partial` with whatever survived cleanly. A file whose
+  **parse** exceeds the 250 ms budget is aborted inside tree-sitter (progress
+  callback) and labeled `timeout` with **no** extracted facts — a labeled
+  degradation, never a hang; the budget guards the parse, and post-parse
+  collection is linear in the 1 MiB input cap (ADR-019 §D).
 - **Resolution (as built, ADR-018):** filesystem-only, no `go list`.
   Imports resolve through nearest-`go.mod` module mapping: own-module
   prefix → repo-relative dir (a *directory*: an import binds the package's
@@ -178,22 +202,42 @@ from the pre-implementation sketch are recorded in ADR-017.*
   is `External`** even when the path looks in-repo (chi `_examples` trap).
   Package identity is `(dir, package_name)` — `foo_test` is a different
   package than `foo`, internal test files share identity but are invisible
-  to importers, and no non-test source ever binds into a test file.
-  Qualifiers come from the alias or the target's **package clause**, never
-  the path tail. Binding: unqualified names/types bind all same-package
-  defs (build-tag variants — gin `codec/json` ships 4); package-qualified
-  selectors bind exported defs, kind-appropriate; bare method calls bind
-  only when unique in the package and not on Go's universal interface
-  surface (`Close`, `ServeHTTP`, … — own unbound reason
-  `universe_method`); bare field accesses and method values never bind
-  (`needs_type_info`). Every unbound ref carries a documented reason,
-  published as a histogram (ARCHITECTURE §4.3). Optional precision sidecar
+  to importers, and no non-test source ever binds into a test file
+  (dot-import ambiguity is decided **after** that visibility rule). An
+  import into a directory whose only package is `main` is not an import
+  target (`cmd/`-style dirs resolve to their non-`main` packages, or
+  nothing). **`internal/` visibility (Go's rule, module-relative):** an
+  import path with an `internal` element is importable only from within the
+  tree rooted at that element's parent; a violating import is
+  `Unresolved(internal)` — its own reason, because "could not compile"
+  differs from "wrong path" (`NotFound`). Qualifiers come from the alias or
+  the target's **package clause**, never the path tail; for external
+  imports the default qualifier strips a trailing **`/vN` major-version
+  suffix** (module `…/chi/v5` → qualifier `chi`). Selector refs carry the
+  structural qualifier (ADR-020): a qualifier naming an in-repo import
+  scopes the ref to that package's exported defs, kind-appropriate; a
+  qualifier naming an external import is `external_scope`; a **computed
+  operand** (`w.Header().Add`) can never name a package and emits
+  `no_scope` — revived for exactly that class; an **unknown identifier**
+  operand (`rp.Add` where `rp` is a value) keeps the bare-instance rule:
+  bind the unique same-package method of that name. Unqualified names/types
+  bind all same-package defs (build-tag variants — gin `codec/json` ships
+  4); bare method calls bind only when unique in the package and not on
+  Go's universal interface surface (`Close`, `Run`, `ServeHTTP`, … — own
+  unbound reason `universe_method`); bare field accesses and method values
+  never bind (`needs_type_info`). Names with >256 candidates are skipped as
+  uninformative — the resolver returns a dampener flag per ref and the
+  caller aggregates it into `names_skipped` (no shared counters). Every
+  unbound ref carries a documented reason, published as a histogram
+  (ARCHITECTURE §4.3). Optional precision sidecar
   (`go list`/SCIP) stays behind `--deep=go`, never required. Dot/blank
   import rules are fixture-validated only — zero occurrences in 875
   real-world import lines (census).
 - **Measured (docs/benchmarks/resolver-gin-chi.md):** in-repo import
-  resolution 100% on gin and chi; sampled binding precision 97.4%/96.9%;
-  resolve ≤ 11 ms per repo.
+  resolution 100% on gin and chi (re-audited at pinned SHAs); sampled
+  binding precision 152 sampled, 0 false positives (LB ≈ 97.5%);
+  resolve ≤ 11 ms per repo; 10k-file cold pipeline 9.72 s
+  (docs/benchmarks/scaling_report.md).
 - **Hard parts:** embedded/promoted fields and methods (approximate: treat
   promoted methods as defs of the embedded type — labeled
   over-approximation); build-tagged files (index all — extraction is

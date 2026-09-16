@@ -30,6 +30,8 @@ intact.
 | [016](ADR-016-rejected-reconnaissance-findings.md) | Reconnaissance findings rejected, and why | Accepted | Bootstrap |
 | [017](ADR-017-extraction-contract-as-built.md) | Extraction contract as built (package, ref kinds, exported, aliases, degradation) | Accepted | Go extraction |
 | [018](ADR-018-go-resolver.md) | Go resolver: filesystem-only, package identity, honest approximation | Accepted | Go resolver |
+| [019](ADR-019-foundation-recovery.md) | Foundation recovery: audit fixes accepted, refuted, and measured | Accepted | Foundation Recovery |
+| [020](ADR-020-ref-qualifier-addendum.md) | Ref qualifier addendum: structural selectors, operand suppression | Accepted | Foundation Recovery |
 
 ## How these were verified
 

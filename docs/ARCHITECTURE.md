@@ -94,25 +94,50 @@ beyond reading the index snapshot — this is what makes determinism testable.
 - **Purpose:** enumerate the files that belong to the index.
 - **Inputs:** repo root, ignore rules (`.gitignore`, `.ignore`, `.contextsliceignore`,
   built-in defaults: vendored dirs, lockfiles, binaries, media), size caps.
-- **Outputs:** ordered stream of `ScannedFile { path, lang, size, mtime, blake3 }`.
-- **Algorithms/data:** `ignore` crate walker (parallel), extension+shebang→language map,
-  blake3 hashing (streaming, 1 MiB chunks).
+- **Outputs (as built, 2026-09-16):** ordered stream of
+  `ScannedFile { path, lang, size, mtime, blake3 }`, sorted by the normalized
+  `/`-separated path **string** — the same ordering SQLite's BINARY collation
+  produces, so document order and database order can never disagree (a
+  `PathBuf` component-wise sort orders `"a-b/c.go"` and `"a/b/c.go"`
+  differently; the string sort is the contract).
+- **Algorithms/data (as built):** `ignore`-crate walker, **sequential** — one
+  stat per file during discovery, then hashing in sorted order (streaming,
+  1 MiB chunks). Language = extension map plus shebang patterns for
+  extensionless scripts. `.git/` is never descended (credential-bearing
+  internals; SECURITY §7/§8) and ignore semantics apply whether or not
+  `.git` exists (`require_git(false)` — extracted archives get the same
+  rules). Caps are enforced *during* the walk: an adversarial tree stops at
+  the first trip of the file or byte cap, not after full discovery. Two
+  caps, both as built: the 1 MiB **parse cap** (hashed for change detection,
+  never parsed) and the 50 MiB **read cap** (listed with size, never read,
+  no hash). `mtime` is captured per file (seconds since epoch; `0` when the
+  filesystem does not report one).
 - **Storage:** none (feeds cs-index).
-- **Performance:** traversal+hash dominated; 10k files in seconds; hashing is the
-  largest single cost and is parallelized.
-- **Failure modes:** symlink loops (cycle detection), unreadable files (skip + record),
-  files > 1 MiB (parse-skip, still listed at L1 with size), files > 50 MiB (read-skip).
+- **Performance:** traversal+hash dominated; measured single-threaded as part
+  of the 10k cold pipeline (9.72 s end-to-end through extraction and
+  resolution, `docs/benchmarks/scaling_report.md`). **Rayon parallelism is a
+  cs-index cold-path *option*, not an as-built fact** — it is gated on
+  measurement: the single-threaded pipeline already leaves ~6× headroom
+  against the 60 s cold budget, so parallelizing before cs-index exists would
+  be tuning without a number. Any future parallelism reuses the
+  sort-before-persist rule (§7).
+- **Failure modes:** symlink loops (never followed), unreadable files (skip +
+  labeled reason), files > 1 MiB (parse-skip, still listed and hashed at L1),
+  files > 50 MiB (read-skip, no hash), cap trips (labeled `CapExceeded`).
 - **MVP:** yes.
 
 ### 4.2 cs-extract
 
 - **Purpose:** turn source files into structured facts.
 - **Inputs:** file bytes + language.
-- **Outputs (as built for Go, 2026-09-15):** `ExtractedFile { package_name,
+- **Outputs (as built for Go, 2026-09-16):** `ExtractedFile { package_name,
   defs: Vec<Def>, refs: Vec<Ref>, imports: Vec<Import>, status }` where
   `Def { name, qual_name, kind, span, container, exported, signature, doc }`,
-  `Ref { name, kind, span, container }` (kind: `name_ref`/`field_ref`/
-  `type_ref` — the resolver's binding rule selector), and
+  `Ref { name, kind, qualifier, span, container }` (kind: `name_ref`/
+  `field_ref`/`call_ref`/`type_ref` — the resolver's binding rule selector;
+  qualifier: the selector operand's identifier text per ADR-020, `None` when
+  there is no selector or the operand is computed — operands themselves are
+  scope structure and are not emitted as refs), and
   `Import { raw, alias, kind, span }`. Signatures and docs are extracted
   strings, not spans (spans alone cannot render L2/L3 without the source at
   hand, and goldens pin the exact strings).
@@ -122,8 +147,16 @@ beyond reading the index snapshot — this is what makes determinism testable.
   `@ref.name/@ref.field/@ref.type`, `@import.path/@import.alias`; Rust
   post-processing applies the rules queries cannot express (declaration-
   position filtering, doc adjacency, signature construction — LANGUAGES §6.1).
-  Parse timeout (default 250 ms/file) and node-count cap guard against pathological
-  grammars.
+  **Parse timeout as built (2026-09-16):** the 250 ms per-file budget is
+  enforced *inside* tree-sitter via the `ParseOptions` progress callback — an
+  over-budget parse is aborted cooperatively and the file is labeled
+  `timeout` (`ParseStatus::Timeout`) with no extracted facts; there is no
+  node-count cap, which was unimplementable to enforce. The budget covers the
+  **parse**; post-parse fact collection is a separate phase that is linear in
+  the 1 MiB input cap, with a measured worst case of ~0.34 s at the cap
+  (ADR-019 §D records the decision to keep the deadline on the parse only,
+  and the `only_directive_lines` quadratic that made collection super-linear
+  until it was fixed to O(gap)).
 - **Why owned queries (ADR-012):** the upstream `tree-sitter-tags` convention relies on
   `#strip!` / `#set-adjacent!` predicates that the core Rust binding does not implement.
   Core parsing *accepts* unknown predicates and then ignores them, so a tags-style query
@@ -136,11 +169,15 @@ beyond reading the index snapshot — this is what makes determinism testable.
   (measured; ADR-008). A file whose content disagrees with its extension parses partially
   and is labeled `partial` rather than guessed at.
 - **Storage:** none (feeds cs-resolve/cs-index).
-- **Performance:** tree-sitter parses at roughly Babel-class speed; parallel by file
-  (rayon). This is the cold-index bottleneck; budget ~10 MB/s/core.
-- **Failure modes:** grammar errors (tree-sitter error nodes — extract what resolved);
-  timeout (mark `parse_partial`); unknown language (no adapter → heuristic path: no defs,
-  content terms only).
+- **Performance:** tree-sitter parses at roughly Babel-class speed; the
+  measured max-cap (1 MiB) parse is 66–74 ms against the 250 ms budget, and
+  the 10k-file cold pipeline (extract + resolve) runs 9.72 s single-threaded
+  (`docs/benchmarks/scaling_report.md`). Parallel-by-file (rayon) remains the
+  cs-index cold-path option (§4.1).
+- **Failure modes:** grammar errors (tree-sitter error nodes — extract what
+  resolved, labeled `partial`); timeout (parse aborted under the budget,
+  labeled `timeout`, no facts — SECURITY §6); unknown language (no adapter →
+  heuristic path: no defs, content terms only).
 - **MVP:** yes (Go first, then TS, Python).
 
 ### 4.3 cs-resolve
@@ -171,9 +208,12 @@ beyond reading the index snapshot — this is what makes determinism testable.
   is untouched. Names with >256 candidates skipped (aider's dampener).
 - **Failure modes:** every degradation is a labeled outcome, not an error:
   `External` (stdlib/third-party/nested module — correct), `NotFound`,
-  `EscapesRoot`, and per-ref unbound reasons (`no_candidate`,
-  `external_scope`, `no_scope`, `method_ambiguous`, `ambiguous_dot_import`,
-  `needs_type_info`, `universe_method`) surfaced as a histogram.
+  `EscapesRoot`, `Internal` (Go's `internal/` visibility rule module-relative
+  — the code could not compile, so the dependency does not exist for this
+  importer), and per-ref unbound reasons (`no_candidate`,
+  `external_scope`, `no_scope` (computed selector operands, ADR-020),
+  `method_ambiguous`, `ambiguous_dot_import`, `needs_type_info`,
+  `universe_method`) surfaced as a histogram.
 - **MVP:** yes (Go; TS/Python follow the same trait shape).
 
 ### 4.4 cs-index
@@ -289,7 +329,7 @@ CREATE TABLE files (
   hash BLOB NOT NULL,                 -- blake3 of content
   size INTEGER NOT NULL,
   mtime INTEGER NOT NULL,
-  parse_status TEXT NOT NULL,         -- ok | partial | skipped | unsupported
+  parse_status TEXT NOT NULL,         -- ok | partial | timeout | skipped | unsupported
   tokens_est INTEGER                  -- whole-file estimate, for map mode
 );
 
@@ -313,7 +353,8 @@ CREATE TABLE refs (
   id INTEGER PRIMARY KEY,
   file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
-  kind TEXT NOT NULL,                 -- name_ref | field_ref | type_ref
+  kind TEXT NOT NULL,                 -- name_ref | field_ref | call_ref | type_ref
+  qualifier TEXT,                     -- selector operand identifier (ADR-020); NULL = none/computed
   line INTEGER NOT NULL,
   container_id INTEGER REFERENCES symbols(id),
   resolved_symbol_id INTEGER REFERENCES symbols(id)  -- NULL = unresolved (approx graph)
@@ -324,7 +365,9 @@ CREATE TABLE imports (
   file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
   raw TEXT NOT NULL,                  -- specifier as written
   alias TEXT,                         -- named alias; '.' dot import; '_' blank import; NULL plain
-  resolved_dir TEXT,                          -- package directory (a Go import binds a multi-file package, ADR-018); NULL = external/unresolved
+  resolved_dir TEXT,                  -- package directory (Go imports bind multi-file packages, ADR-018); NULL = external/unresolved
+  resolved_file TEXT,                 -- file-module languages only (TS/Python import files, F-24): exactly ONE of
+                                      -- resolved_dir/resolved_file is non-NULL per row, set by the language's convention
   kind TEXT NOT NULL                  -- import|export-from|require|dynamic...
 );
 
@@ -387,12 +430,12 @@ Targets (restated from MASTER_PLAN §9) and the techniques that buy them:
 
 | Target | Technique |
 |---|---|
-| Cold 10k < 60 s | rayon parse (≈10 MB/s/core), batched inserts, skip vendored/lockfiles by default |
+| Cold 10k < 60 s | measured single-threaded pipeline: 9.72 s at 10k (extract + prepare + resolve, `docs/benchmarks/scaling_report.md`); rayon parse remains an option if a real index run breaches the budget; skip vendored/lockfiles by default |
 | Cold 100k < 12 min | same + 1 MiB parse cap, candidate-list caps in resolver |
 | Incremental < 2 s | content-hash diffing; only dirty files re-parsed/edge-rewritten |
 | Warm slice < 1 s | snapshot-pinned reads; CSR built once per invocation; FTS5 with a prepared query |
 | Startup < 50 ms | lazy grammar loading (only languages present); clap minimal; no runtime config parsing beyond one TOML |
-| RSS < 1 GB @50k | streaming extraction (never hold all CSTs; extract facts, drop tree); SQLite batches |
+| RSS < 1 GB @50k | **requires the streaming design — mandatory in cs-index.** The current materializing API (whole-repo snapshot + resolver index + `ResolvedRepo` in memory) measures **3.30 GiB peak at 50k** — a 3.3× breach; the 1 GB wall sits near 15k files — `docs/benchmarks/scaling_report.md`. cs-index must stream: extract and resolve package-by-package (or batch), write incrementally, drop in-memory results |
 | Index ≤ ~15 MB/10k | no source text stored (spans + signatures only); refs deduplicated by (name,line) |
 
 Load-bearing rule: **source text is never persisted.** The index stores spans and
@@ -439,7 +482,7 @@ re-index.
 |---|---|---|
 | Language without adapter | content/path heuristics only (no defs/edges) | header notes "heuristic mode for 412 files" |
 | Unresolved TS alias | ref left unresolved; edge absent | resolution-rate % in `doctor` |
-| Parse timeout / error nodes | partial extraction, `parse_status=partial` | warning row in `doctor`, marker in header |
+| Parse timeout / error nodes | timeout: parse aborted, no facts, `parse_status=timeout`; error nodes: partial extraction, `parse_status=partial` | warning row in `doctor`, marker in header |
 | File > 1 MiB | listed (L1 eligible), not parsed | header note |
 | Not a git repo / `--no-git` | git priors = 0 | silent (documented) |
 | Empty seed set | map-mode fallback (aider-style skeleton map) | explicit "no seeds; repo map" header |

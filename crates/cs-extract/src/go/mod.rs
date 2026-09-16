@@ -30,12 +30,13 @@
 //! an error node. Everything inside an error region is dropped rather than
 //! guessed at, and the file is labeled [`ParseStatus::Partial`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use crate::{
-    grammar_for, parse_source, Def, DefKind, ExtractError, ExtractedFile, Import, ImportKind,
-    ParseStatus, Ref, RefKind, Span,
+    grammar_for, parse_source_with_timeout, Def, DefKind, ExtractError, ExtractedFile, Import,
+    ImportKind, ParseStatus, Parsed, Ref, RefKind, Span,
 };
 use cs_scanner::Language;
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
@@ -78,7 +79,13 @@ fn imports_query() -> &'static Query {
     })
 }
 
-/// Go's predeclared identifiers: universe types, builtins and constants.
+/// Go's predeclared identifiers: universe types, builtins and constants,
+/// sorted so [`is_universe`]'s binary search is sound.
+///
+/// (A previous version grouped the names into three internally sorted blocks
+/// and binary-searched the concatenation; every builtin after the first
+/// block's maximum silently failed to match and leaked into refs. The
+/// sortedness is now pinned by a unit test.)
 ///
 /// References to these can never bind to a repository definition — they are
 /// universe-scoped, and package-level shadowing of them is pathological Go.
@@ -87,56 +94,50 @@ fn imports_query() -> &'static Query {
 /// extraction. This is a language-level *binding* fact, documented here and
 /// in LANGUAGES.md §6.1 rather than hidden in the resolver.
 const UNIVERSE_NAMES: &[&str] = &[
-    // types
     "any",
+    "append",
     "bool",
     "byte",
-    "comparable",
-    "complex64",
-    "complex128",
-    "error",
-    "f32",
-    "f64",
-    "float32",
-    "float64",
-    "int",
-    "int8",
-    "int16",
-    "int32",
-    "int64",
-    "rune",
-    "string",
-    "uint",
-    "uint8",
-    "uint16",
-    "uint32",
-    "uint64",
-    "uintptr",
-    // builtins
-    "append",
     "cap",
     "clear",
     "close",
+    "comparable",
     "complex",
+    "complex128",
+    "complex64",
     "copy",
     "delete",
+    "error",
+    "false",
+    "float32",
+    "float64",
     "imag",
+    "int",
+    "int16",
+    "int32",
+    "int64",
+    "int8",
+    "iota",
     "len",
     "make",
     "max",
     "min",
     "new",
+    "nil",
     "panic",
     "print",
     "println",
     "real",
     "recover",
-    // constants (grammar usually types these as literals, not identifiers;
-    // listed for completeness and shadow-proofing)
-    "nil",
+    "rune",
+    "string",
     "true",
-    "false",
-    "iota",
+    "uint",
+    "uint16",
+    "uint32",
+    "uint64",
+    "uint8",
+    "uintptr",
 ];
 
 fn is_universe(name: &str) -> bool {
@@ -152,8 +153,17 @@ fn is_universe(name: &str) -> bool {
 /// Only infrastructure failures ([`ExtractError::IncompatibleGrammar`],
 /// [`ExtractError::NoTree`]); malformed Go is reported via
 /// [`ParseStatus::Partial`], never as an error.
-pub(super) fn extract(source: &str) -> Result<ExtractedFile, ExtractError> {
-    let (tree, status) = parse_source(source, Language::Go)?;
+pub(super) fn extract_with_timeout(
+    source: &str,
+    timeout: Duration,
+) -> Result<ExtractedFile, ExtractError> {
+    // The per-file budget is enforced inside the parse (SECURITY.md §6); a
+    // file that trips it is a labeled degradation with no facts, not a crash.
+    let parsed = parse_source_with_timeout(source, Language::Go, timeout)?;
+    let (tree, status) = match parsed {
+        Parsed::Tree(tree, status) => (tree, status),
+        Parsed::TimedOut => return Ok(ExtractedFile::skipped(ParseStatus::Timeout)),
+    };
     let root = tree.root_node();
     let (mut defs, dropped_spans) = collect_defs(root, source);
     defs.sort_by(|a, b| {
@@ -233,11 +243,48 @@ fn package_name(root: Node, source: &str) -> Option<String> {
 // Definitions
 // ---------------------------------------------------------------------------
 
+/// Merge two doc-comment candidates for one spec node, preferring the one
+/// adjacent to the declaration (directive lines in between allowed) — the
+/// per-spec comment beats the enclosing group's comment, which the query
+/// patterns deliver separately but only the former is the doc Go recognizes.
+fn better_doc<'t>(
+    source: &str,
+    decl: Node<'t>,
+    entry_doc: Option<Node<'t>>,
+    new_doc: Option<Node<'t>>,
+) -> Option<Node<'t>> {
+    let adjacent = |doc: Node<'t>| {
+        decl.start_position().row > doc.end_position().row
+            && only_directive_lines(source, doc.end_byte(), decl.start_byte())
+    };
+    match (entry_doc, new_doc) {
+        (None, new) => new,
+        (old, Some(new)) if adjacent(new) => {
+            if old.is_some_and(adjacent) {
+                old // both adjacent (impossible per query shapes) — first wins
+            } else {
+                Some(new)
+            }
+        }
+        (old, _) => old,
+    }
+}
+
 /// One raw def match, before deduplication by node identity.
 struct RawDef<'t> {
     node: Node<'t>,
     names: Vec<String>,
     doc_node: Option<Node<'t>>,
+}
+
+/// One raw ref capture, before filtering, with the selector qualifier
+/// already read from the tree (ADR-017 addendum: extraction owns the
+/// syntax; the resolver gets flat refs and must not reconstruct
+/// selector relationships from byte adjacency).
+struct RawRef<'t> {
+    kind: RefKind,
+    node: Node<'t>,
+    qualifier: Option<String>,
 }
 
 /// Definitions plus the byte spans of declarations that were *dropped* by
@@ -251,6 +298,12 @@ fn collect_defs(root: Node, source: &str) -> (Vec<Def>, Vec<(usize, usize)>) {
     let mut cursor = QueryCursor::new();
 
     let mut raw: Vec<RawDef> = Vec::new();
+    // Node id → index into `raw`. A node id has at most one raw entry (any
+    // later match over the same node merges into the first below), so one
+    // map serves both merge shapes; the name check happens at the target.
+    // This keeps the merges O(1) — a linear `raw` rescan per match measured
+    // quadratic in def count (11.5 s for a 1 MiB, ~8.9k-def file).
+    let mut raw_index: HashMap<usize, usize> = HashMap::new();
 
     let mut matches = cursor.matches(query, root, source.as_bytes());
     while let Some(m) = matches.next() {
@@ -270,28 +323,34 @@ fn collect_defs(root: Node, source: &str) -> (Vec<Def>, Vec<(usize, usize)>) {
             continue;
         }
         // Multi-name specs (`var X, Y int`) yield one match per name over
-        // the same spec node: merge by (node, name), and let a later match
-        // fill in a doc the first lacked — match order must not decide.
-        if let Some(entry) = raw
-            .iter_mut()
-            .find(|r| r.node.id() == node.id() && r.names.iter().any(|n| n == &names[0]))
-        {
-            if entry.doc_node.is_none() {
-                entry.doc_node = doc_node;
+        // the same spec node: merge by (node, name). A later match may carry
+        // a *better* doc: the group-comment patterns and the per-spec
+        // comment patterns can both hit the same spec, and only the
+        // spec-adjacent one is the doc Go recognizes — a group comment above
+        // `const (` is separated from every inner spec by the paren line.
+        // Prefer an adjacent doc (directive lines in between allowed);
+        // keep whatever arrives otherwise.
+        match raw_index.get(&node.id()).copied() {
+            // Same name again (one match per name over a multi-name spec):
+            // only the doc can improve.
+            Some(idx) if raw[idx].names.iter().any(|n| n == &names[0]) => {
+                let entry = &mut raw[idx];
+                entry.doc_node = better_doc(source, node, entry.doc_node, doc_node);
             }
-            continue;
-        }
-        if let Some(entry) = raw.iter_mut().find(|r| r.node.id() == node.id()) {
-            entry.names.extend(names);
-            if entry.doc_node.is_none() {
-                entry.doc_node = doc_node;
+            // A genuinely new name on a seen node: merge it in.
+            Some(idx) => {
+                let entry = &mut raw[idx];
+                entry.names.extend(names);
+                entry.doc_node = better_doc(source, node, entry.doc_node, doc_node);
             }
-        } else {
-            raw.push(RawDef {
-                node,
-                names,
-                doc_node,
-            });
+            None => {
+                raw_index.insert(node.id(), raw.len());
+                raw.push(RawDef {
+                    node,
+                    names,
+                    doc_node,
+                });
+            }
         }
     }
 
@@ -306,7 +365,7 @@ fn collect_defs(root: Node, source: &str) -> (Vec<Def>, Vec<(usize, usize)>) {
         .into_iter()
         .filter(|r| !r.node.has_error()) // degradation policy: clean subtrees only
         .flat_map(|r| {
-            let kind = def_kind(r.node, source);
+            let kind = def_kind(r.node);
             let container = if r.node.kind() == "method_declaration" {
                 receiver_type_name(r.node, source)
             } else {
@@ -346,7 +405,7 @@ fn collect_defs(root: Node, source: &str) -> (Vec<Def>, Vec<(usize, usize)>) {
 /// Canonical kind for a declaration node (LANGUAGES.md §6.1): struct and
 /// interface type specs get their own kinds; everything named through
 /// `type` that is neither is a plain type; aliases are types.
-fn def_kind(node: Node, source: &str) -> DefKind {
+fn def_kind(node: Node) -> DefKind {
     match node.kind() {
         "function_declaration" => DefKind::Function,
         "method_declaration" => DefKind::Method,
@@ -361,10 +420,12 @@ fn def_kind(node: Node, source: &str) -> DefKind {
         other => {
             // The queries only capture the six node kinds above; anything
             // else means the query set and this match drifted apart.
-            let head = &source[node.start_byte()..source.len().min(node.end_byte())];
+            //
+            // No source text in the message: panic output is a log (SECURITY
+            // §7 — logs never print file contents).
             debug_assert!(
                 false,
-                "unexpected def node kind '{other}' near {head:?} — update def_kind"
+                "unexpected def node kind '{other}' — update def_kind"
             );
             DefKind::Type
         }
@@ -466,11 +527,19 @@ fn spec_text_elliding_bodies(node: Node, source: &str) -> String {
 /// kept, per the `Def.doc` contract. Tree adjacency alone is not enough,
 /// which is why the query's `.` anchor is only a candidate filter and the
 /// authoritative check lives here.
+///
+/// `//go:`-style compiler directives are never docs: they are filtered out
+/// of the assembled block, and a directive line sitting between the comment
+/// block and the declaration (gofmt's preferred position) does not break
+/// adjacency.
 fn doc_comment(adjacent: Node, decl: Node, source: &str) -> Option<String> {
     // The declaration must start on the line right after the comment block
-    // ends. `adjacent` is the query-adjacent comment; walk left through
-    // line-contiguous comments to assemble the whole block.
-    if decl.start_position().row != adjacent.end_position().row + 1 {
+    // ends — allowing only directive lines in between. `adjacent` is the
+    // query-adjacent comment; walk left through line-contiguous comments to
+    // assemble the whole block.
+    if decl.start_position().row <= adjacent.end_position().row
+        || !only_directive_lines(source, adjacent.end_byte(), decl.start_byte())
+    {
         return None;
     }
     let mut block = vec![adjacent];
@@ -484,6 +553,13 @@ fn doc_comment(adjacent: Node, decl: Node, source: &str) -> Option<String> {
         }
     }
     block.reverse();
+    block.retain(|comment| !is_compiler_directive(*comment, source));
+    let Some(last) = block.last() else {
+        return None; // nothing but directives: no doc
+    };
+    if !only_directive_lines(source, last.end_byte(), decl.start_byte()) {
+        return None;
+    }
 
     // First paragraph: skip blank lines the comment opens with (common in
     // /* */ blocks), then keep lines until the next blank line.
@@ -501,6 +577,38 @@ fn doc_comment(adjacent: Node, decl: Node, source: &str) -> Option<String> {
         return None;
     }
     Some(paragraph.join("\n"))
+}
+
+/// Whether a comment is a `//go:` compiler directive (`//go:noinline`,
+/// `//go:generate`, …): toolchain input, never a doc comment.
+fn is_compiler_directive(comment: Node, source: &str) -> bool {
+    node_text(comment, source).trim_start().starts_with("//go:")
+}
+
+/// Whether the lines strictly between two nodes — everything after the end
+/// of `above`'s line and before the line `below` starts on — are all
+/// `//go:` directives. Callers pass the nodes' byte spans; the gap between
+/// them decomposes into the remainder of the upper node's own line, the
+/// in-between lines (each `\n`-terminated), and `below`'s leading
+/// indentation — so checking every newline-delimited segment except the
+/// first and the last is exactly that row-range check, at a cost
+/// proportional to the gap. (Counting `source.lines()` here instead scanned
+/// the whole file per documented declaration: quadratic extraction, ~11.6 s
+/// for a 1 MiB, ~8.9k-def file.) An empty in-between range is trivially
+/// true; a gap that is not a substring of the source is treated as broken
+/// adjacency.
+fn only_directive_lines(source: &str, above_end_byte: usize, below_start_byte: usize) -> bool {
+    let Some(gap) = source.get(above_end_byte..below_start_byte) else {
+        return false;
+    };
+    let mut segments = gap.split('\n').peekable();
+    segments.next(); // remainder of the upper node's own line: not a line "between"
+    while let Some(segment) = segments.next() {
+        if segments.peek().is_some() && !segment.trim_start().starts_with("//go:") {
+            return false;
+        }
+    }
+    true
 }
 
 /// The text lines of one comment node with markers stripped: `//`, `/* */`,
@@ -556,9 +664,11 @@ fn collect_imports(root: Node, source: &str) -> Vec<Import> {
         let (Some(node), Some(path)) = (node, path) else {
             continue;
         };
-        // Strip the surrounding quotes; Go import paths forbid escapes, so
-        // the quoted content is the specifier, verbatim.
-        let raw = path.trim_matches('"').to_owned();
+        // Strip the surrounding quotes — interpreted (`"…"`) or raw
+        // (`…` backticks; legal for import paths per the Go spec). Go
+        // import paths forbid escapes, so the quoted content is the
+        // specifier, verbatim.
+        let raw = path.trim_matches(|c| c == '"' || c == '`').to_owned();
         match merged.iter_mut().find(|(id, _, _)| *id == node.id()) {
             Some((_, import, has_alias)) => {
                 if let Some(alias) = alias.filter(|_| !*has_alias) {
@@ -597,86 +707,128 @@ fn collect_refs(
     let mut cursor = QueryCursor::new();
     let declared = declaration_spans(root, source);
 
-    let mut refs: Vec<Ref> = Vec::new();
+    // Pass 1: gather captures; derive qualifiers from selector/qualified_type
+    // parents and record operand spans so the operand identifier is never
+    // emitted as an independent reference.
+    let mut raw: Vec<RawRef> = Vec::new();
+    let mut qualifier_spans: HashSet<(usize, usize)> = HashSet::new();
+
     let mut matches = cursor.matches(query, root, source.as_bytes());
     while let Some(m) = matches.next() {
         for c in m.captures() {
-            let mut kind = match capture_names[c.index as usize] {
+            let kind = match capture_names[c.index as usize] {
                 "ref.name" => RefKind::NameRef,
                 "ref.field" => RefKind::FieldRef,
                 "ref.type" => RefKind::TypeRef,
                 _ => continue,
             };
             let node = c.node;
-            let name = node_text(node, source);
-
-            // Degradation policy: nothing from inside an error region, and
-            // nothing from inside a declaration the policy dropped.
-            if status == ParseStatus::Partial && has_error_ancestor(node) {
-                continue;
-            }
-            if dropped_spans
-                .iter()
-                .any(|(start, end)| *start <= node.start_byte() && node.end_byte() <= *end)
-            {
-                continue;
-            }
-            // Declaration positions are not references, and universe names
-            // can never bind to anything in the repository.
             match kind {
-                RefKind::NameRef => {
-                    if name == "_"
-                        || is_universe(name)
-                        || declared.contains(&(node.start_byte(), node.end_byte()))
-                    {
-                        continue;
-                    }
-                }
+                RefKind::NameRef => raw.push(RawRef {
+                    kind,
+                    node,
+                    qualifier: None,
+                }),
                 // field_identifier also spells method names, struct fields
                 // and interface method elements; only selector fields are
-                // references. Within selectors, call position (`x.Foo()`)
-                // upgrades to CallRef — the resolver binds calls and field
-                // accesses under different rules and cannot see the tree
-                // (ADR-018).
+                // references.
                 RefKind::FieldRef => {
-                    let parent = node.parent();
-                    let Some(selector) = parent.filter(|p| p.kind() == "selector_expression")
+                    let Some(selector) =
+                        node.parent().filter(|p| p.kind() == "selector_expression")
                     else {
                         continue;
                     };
-                    let in_call_position = selector.parent().is_some_and(|call| {
-                        call.kind() == "call_expression"
-                            && call.child_by_field_name("function") == Some(selector)
+                    let qualifier =
+                        selector_operand_qualifier(selector, source, &mut qualifier_spans);
+                    // Call position (`x.Foo()`, `pkg.Foo()`, `pkg.F[T]()`)
+                    // upgrades to CallRef — the resolver binds calls and
+                    // field accesses under different rules (ADR-018).
+                    let kind = if in_call_position(selector) {
+                        RefKind::CallRef
+                    } else {
+                        kind
+                    };
+                    raw.push(RawRef {
+                        kind,
+                        node,
+                        qualifier,
                     });
-                    if in_call_position {
-                        kind = RefKind::CallRef;
-                    }
                 }
-                // CallRef is only produced by the FieldRef arm below, never
-                // by a capture; the arm exists for exhaustiveness.
-                RefKind::CallRef => {}
-                // type_identifier also spells type-spec names (top-level
-                // and local); those positions are declarations. Universe
-                // types (`int`, `error`, …) are dropped for the same reason
-                // as above.
+                // Type usage: a qualified type carries its package as the
+                // structural qualifier (`io.Closer`); the `package` child is
+                // a `package_identifier`, which no reference pattern
+                // captures, so nothing needs suppressing here.
                 RefKind::TypeRef => {
-                    if is_universe(name)
-                        || node
-                            .parent()
-                            .is_some_and(|p| p.kind() == "type_spec" || p.kind() == "type_alias")
-                    {
-                        continue;
-                    }
+                    let qualifier = node
+                        .parent()
+                        .filter(|p| p.kind() == "qualified_type")
+                        .and_then(|qt| qt.child_by_field_name("package"))
+                        .map(|p| node_text(p, source).to_owned());
+                    raw.push(RawRef {
+                        kind,
+                        node,
+                        qualifier,
+                    });
+                }
+                // CallRef is only produced by the FieldRef arm, never by a
+                // capture; the arm exists for exhaustiveness.
+                RefKind::CallRef => {}
+            }
+        }
+    }
+
+    // Pass 2: the degradation and declaration filters, in source order.
+    raw.sort_by_key(|r| (r.node.start_byte(), r.node.end_byte()));
+    let mut refs: Vec<Ref> = Vec::new();
+    for r in raw {
+        let node = r.node;
+        let name = node_text(node, source);
+
+        // Degradation policy: nothing from inside an error region, and
+        // nothing from inside a declaration the policy dropped.
+        if status == ParseStatus::Partial && has_error_ancestor(node) {
+            continue;
+        }
+        if dropped_spans
+            .iter()
+            .any(|(start, end)| *start <= node.start_byte() && node.end_byte() <= *end)
+        {
+            continue;
+        }
+        match r.kind {
+            // Declaration positions are not references; selector operands are
+            // scope structure, not name uses; universe names can never bind.
+            RefKind::NameRef => {
+                if name == "_"
+                    || is_universe(name)
+                    || declared.contains(&(node.start_byte(), node.end_byte()))
+                    || qualifier_spans.contains(&(node.start_byte(), node.end_byte()))
+                {
+                    continue;
                 }
             }
-
-            refs.push(Ref {
-                name: name.to_owned(),
-                kind,
-                span: span_of(node),
-                container: container_for(node, defs),
-            });
+            // The `name` field of a type_spec/type_alias is the definition's
+            // own name — but only that position: the TARGET of an alias or
+            // named type (`type ID = UUID`) is a real reference.
+            RefKind::TypeRef => {
+                let in_name_position = node.parent().is_some_and(|p| {
+                    matches!(p.kind(), "type_spec" | "type_alias")
+                        && p.child_by_field_name("name").map(|n| n.id()) == Some(node.id())
+                });
+                if is_universe(name) || in_name_position {
+                    continue;
+                }
+            }
+            RefKind::FieldRef | RefKind::CallRef => {}
         }
+
+        refs.push(Ref {
+            name: name.to_owned(),
+            kind: r.kind,
+            qualifier: r.qualifier,
+            span: span_of(node),
+            container: container_for(node, defs),
+        });
     }
 
     refs.sort_by(|a, b| {
@@ -687,6 +839,41 @@ fn collect_refs(
             .then(a.name.cmp(&b.name))
     });
     refs
+}
+
+/// The qualifier of a selector reference: the operand's text when the operand
+/// is a plain identifier (`auth.Session`, `rp.Add`), `None` for computed
+/// operands (`w.Header().Add`, `arr[0].Close`). The operand occurrence is
+/// scope structure, not a name use — its span is recorded so the
+/// `(identifier) @ref.name` capture for it is suppressed (which also removes
+/// the "local shadows a package-level name" false-positive class at the
+/// source).
+fn selector_operand_qualifier(
+    selector: Node,
+    source: &str,
+    spans: &mut HashSet<(usize, usize)>,
+) -> Option<String> {
+    let operand = selector.child_by_field_name("operand")?;
+    if operand.kind() != "identifier" {
+        return None;
+    }
+    spans.insert((operand.start_byte(), operand.end_byte()));
+    Some(node_text(operand, source).to_owned())
+}
+
+/// Whether a selector is the callee of a call, looking through generic
+/// instantiation brackets: `lib.Factory[int]()` instantiates through an
+/// `index_expression`, so the selector's immediate parent is not the call.
+fn in_call_position(selector: Node) -> bool {
+    let mut probe = selector;
+    while let Some(parent) = probe.parent() {
+        match parent.kind() {
+            "index_expression" => probe = parent,
+            "call_expression" => return parent.child_by_field_name("function") == Some(probe),
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// Spans of identifiers in declaration position, collected by one tree walk:
@@ -703,9 +890,15 @@ fn collect_refs(
 /// The last three need the source text (to distinguish `:=` from `=`), which
 /// is exactly what queries cannot do — hence this walk.
 fn declaration_spans(root: Node, source: &str) -> HashSet<(usize, usize)> {
-    /// Identifiers directly under `node` — parameter names, receiver names,
-    /// the bound variable of a type switch's `alias` list.
+    /// Identifiers in declaration position directly under `node` — or `node`
+    /// itself when it is one: parameter names, receiver names, the bound
+    /// variable of a type switch's `alias` list, the `expression_list` left
+    /// sides of `:=` forms.
     fn collect_direct_identifiers(node: Node, spans: &mut HashSet<(usize, usize)>) {
+        if node.kind() == "identifier" {
+            spans.insert((node.start_byte(), node.end_byte()));
+            return;
+        }
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if child.kind() == "identifier" {
@@ -714,14 +907,15 @@ fn declaration_spans(root: Node, source: &str) -> HashSet<(usize, usize)> {
         }
     }
 
-    /// Identifiers of `node`'s first `expression_list` children (the left
-    /// side of `:=` declarations and `:=` range clauses).
+    /// The `left` field of a `:=` declaration (`short_var_declaration`,
+    /// `:=` range clauses). Only the left side declares: tree-sitter-go
+    /// spells BOTH sides of a short var declaration as `expression_list`
+    /// fields, and collecting every `expression_list` child silently
+    /// declared the right side too — dropping every bare identifier
+    /// assigned from (`y := x` lost the reference to `x`).
     fn collect_left_side_identifiers(node: Node, spans: &mut HashSet<(usize, usize)>) {
-        let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            if child.kind() == "expression_list" {
-                collect_direct_identifiers(child, spans);
-            }
+        if let Some(left) = node.child_by_field_name("left") {
+            collect_direct_identifiers(left, spans);
         }
     }
 
@@ -826,17 +1020,20 @@ fn has_error_ancestor(node: Node) -> bool {
     false
 }
 
-/// The enclosing def's qual-name. Defs are sorted, top-level and disjoint
-/// (multi-name specs share one span), so the last def that starts at or
-/// before the ref and has not ended yet is the unique container.
+/// The enclosing def's qual-name. `defs` is sorted by
+/// `(start_byte, end_byte, name)` and top-level def spans are disjoint
+/// (multi-name specs share one span and produce sibling defs), so exactly
+/// one candidate can contain the node: the last def starting at or before
+/// it — found by binary search over the sorted spans — provided it has not
+/// ended before the node does. No backward scan past a non-containing
+/// candidate: if that one does not enclose the node, no def does.
 #[allow(clippy::cast_possible_truncation)] // bounded by PARSE_SIZE_CAP, see span_of
 fn container_for(node: Node, defs: &[Def]) -> Option<String> {
     let start = node.start_byte() as u32;
     let end = node.end_byte() as u32;
-    defs.iter()
-        .rev()
-        .find(|d| d.span.start_byte <= start && end <= d.span.end_byte)
-        .map(|d| d.qual_name.clone())
+    let idx = defs.partition_point(|d| d.span.start_byte <= start);
+    let candidate = defs.get(idx.checked_sub(1)?)?;
+    (candidate.span.end_byte >= end).then(|| candidate.qual_name.clone())
 }
 
 /// Pre-order visit of every node in the subtree. Iterative, not recursive:
@@ -991,28 +1188,28 @@ mod tests {
         // declarations also appear as legitimate references at their use
         // sites. What must be filtered is the declaration occurrence itself.
         // Counting occurrences proves it: `s` is declared once (param) and
-        // used twice (s.Items, s.N); `x` declared once, used once; each of
-        // err/i/v declared once and used exactly once.
+        // used twice (s.Items, s.N) — but receiver occurrences are scope
+        // structure now (qualifier on the selected ref), so `s` never
+        // appears as an independent name ref at all.
         let count = |n: &str| {
             refs.iter()
                 .filter(|r| r.kind == RefKind::NameRef && r.name == n)
                 .count()
         };
-        assert_eq!(count("s"), 2, "param decl filtered, two uses remain");
+        assert_eq!(count("s"), 0, "receiver occurrences are structural");
         assert_eq!(count("other"), 1, "param decl filtered, one use remains");
         assert_eq!(count("x"), 1);
         assert_eq!(count("err"), 1);
         assert_eq!(count("i"), 1);
         assert_eq!(count("v"), 1);
         assert_eq!(count("g"), 1);
-        assert_eq!(count("fmt"), 1);
+        assert_eq!(count("fmt"), 0, "package operands are structural");
         let field_refs: Vec<&str> = refs
             .iter()
             .filter(|r| r.kind == RefKind::FieldRef)
             .map(|r| r.name.as_str())
             .collect();
-        // `s.Items()` and `fmt.Println(...)` are calls; `s.N` is a field
-        // access — the only field_ref.
+        // `s.N` is the only field access (method values: none here).
         assert_eq!(field_refs, vec!["N"]);
         let call_refs: Vec<&str> = refs
             .iter()
@@ -1046,19 +1243,19 @@ mod tests {
     }
 
     #[test]
-    fn qualified_type_package_qualifier_is_a_name_ref() {
+    fn qualified_type_carries_the_package_as_qualifier() {
         let src = "package p\n\nimport \"io\"\n\ntype R interface {\n\tio.Closer\n}\n";
         let refs = extract(src, Language::Go).expect("go").refs;
+        // The qualifier is structural, not a standalone name ref.
         assert!(
-            refs.iter()
-                .any(|r| r.kind == RefKind::NameRef && r.name == "io"),
-            "package qualifier of an embedded qualified type must be a name ref"
+            !refs.iter().any(|r| r.name == "io"),
+            "the package operand must not be emitted as an independent ref"
         );
-        assert!(
-            refs.iter()
-                .any(|r| r.kind == RefKind::TypeRef && r.name == "Closer"),
-            "the type part must be a type ref"
-        );
+        let closer = refs
+            .iter()
+            .find(|r| r.kind == RefKind::TypeRef && r.name == "Closer")
+            .expect("type part");
+        assert_eq!(closer.qualifier.as_deref(), Some("io"));
     }
 
     #[test]
@@ -1105,17 +1302,78 @@ mod tests {
     }
 
     #[test]
-    fn package_qualified_calls_are_call_refs() {
+    fn package_qualified_calls_are_call_refs_with_qualifier() {
         let src = "package p\n\nimport \"fmt\"\n\nfunc F() {\n\tfmt.Println(\"x\")\n}\n";
         let refs = extract(src, Language::Go).expect("go").refs;
-        assert_eq!(
-            refs.iter().find(|r| r.name == "Println").unwrap().kind,
-            RefKind::CallRef
+        assert!(
+            !refs.iter().any(|r| r.name == "fmt"),
+            "the package operand must not be emitted as an independent ref"
         );
-        assert_eq!(
-            refs.iter().find(|r| r.name == "fmt").unwrap().kind,
-            RefKind::NameRef
+        let println = refs.iter().find(|r| r.name == "Println").unwrap();
+        assert_eq!(println.kind, RefKind::CallRef);
+        assert_eq!(println.qualifier.as_deref(), Some("fmt"));
+    }
+
+    #[test]
+    fn instance_selectors_carry_the_operand_as_qualifier() {
+        // A non-package operand (`s`) is recorded the same way; deciding
+        // scope is the resolver's job. The operand itself is not a ref.
+        let src = "package p\n\ntype S struct{ N int }\n\nfunc F(s S) int {\n\treturn s.N\n}\n";
+        let refs = extract(src, Language::Go).expect("go").refs;
+        assert!(
+            !refs.iter().any(|r| r.name == "s"),
+            "receiver occurrences must not leak as name refs"
         );
+        let n = refs
+            .iter()
+            .find(|r| r.kind == RefKind::FieldRef && r.name == "N")
+            .expect("field access");
+        assert_eq!(n.qualifier.as_deref(), Some("s"));
+    }
+
+    #[test]
+    fn computed_selector_operands_have_no_qualifier() {
+        // `w.Header().Add` — the operand is a call expression, so the ref
+        // carries no qualifier and the resolver must not guess a package.
+        let src = "package p\n\nimport \"net/http\"\n\nfunc H(w http.ResponseWriter) {\n\tw.Header().Add(\"k\", \"v\")\n}\n";
+        let refs = extract(src, Language::Go).expect("go").refs;
+        let add = refs
+            .iter()
+            .find(|r| r.kind == RefKind::CallRef && r.name == "Add")
+            .expect("chained call");
+        assert_eq!(add.qualifier, None);
+    }
+
+    #[test]
+    fn generic_instantiation_calls_are_call_refs() {
+        // `pkg.Factory[int]()` instantiates through an index_expression;
+        // the callee is still a call, not a field access.
+        let src = "package p\n\nimport \"lib\"\n\nfunc F() {\n\t_ = lib.Factory[int]()\n}\n";
+        let refs = extract(src, Language::Go).expect("go").refs;
+        let factory = refs
+            .iter()
+            .find(|r| r.name == "Factory")
+            .expect("instantiated callee");
+        assert_eq!(factory.kind, RefKind::CallRef);
+        assert_eq!(factory.qualifier.as_deref(), Some("lib"));
+    }
+
+    #[test]
+    fn chained_selector_deeper_parts_have_no_qualifier() {
+        // `pkg.sub.Deep`: `sub` is qualified by `pkg`; `Deep`'s operand is
+        // a selector (a value), not a package identifier.
+        let src = "package p\n\nimport \"pkg\"\n\nfunc F() {\n\t_ = pkg.sub.Deep\n}\n";
+        let refs = extract(src, Language::Go).expect("go").refs;
+        let sub = refs
+            .iter()
+            .find(|r| r.kind == RefKind::FieldRef && r.name == "sub")
+            .expect("inner selection");
+        assert_eq!(sub.qualifier.as_deref(), Some("pkg"));
+        let deep = refs
+            .iter()
+            .find(|r| r.kind == RefKind::FieldRef && r.name == "Deep")
+            .expect("outer selection");
+        assert_eq!(deep.qualifier, None);
     }
 
     #[test]
@@ -1248,5 +1506,113 @@ mod tests {
     fn package_clause_is_extracted() {
         let file = extract("package auth\n\nfunc F() {}\n", Language::Go).expect("go");
         assert_eq!(file.package_name.as_deref(), Some("auth"));
+    }
+
+    #[test]
+    fn universe_names_are_strictly_sorted_and_complete() {
+        // `is_universe` binary-searches this slice: an unsorted entry
+        // silently fails to match (the bug that leaked `len`/`make`/`append`
+        // into refs across every Go corpus).
+        assert!(
+            UNIVERSE_NAMES.windows(2).all(|w| w[0] < w[1]),
+            "UNIVERSE_NAMES must be strictly sorted for binary_search"
+        );
+        // Every Go predeclared identifier is recognized (and `f32`/`f64`,
+        // which are not Go names, are absent).
+        for name in UNIVERSE_NAMES {
+            assert!(is_universe(name), "{name} must match");
+        }
+        assert!(!is_universe("f32") && !is_universe("f64"));
+        assert_eq!(UNIVERSE_NAMES.len(), 44, "the Go predeclared set");
+    }
+
+    #[test]
+    fn universe_builtins_never_leak_into_refs() {
+        use std::fmt::Write as _;
+        let mut src = String::from("package p\n\nfunc F() {\n");
+        for name in UNIVERSE_NAMES {
+            writeln!(src, "\t_ = {name}").expect("write");
+        }
+        src.push_str("\t_ = realUser\n}\n\nvar realUser int\n");
+        let refs = extract(&src, Language::Go).expect("go").refs;
+        let leaked: Vec<&str> = refs
+            .iter()
+            .filter(|r| is_universe(&r.name))
+            .map(|r| r.name.as_str())
+            .collect();
+        assert!(leaked.is_empty(), "universe names leaked: {leaked:?}");
+        assert!(refs.iter().any(|r| r.name == "realUser"));
+    }
+
+    #[test]
+    fn short_var_declaration_keeps_rhs_references() {
+        // Only the LEFT side of `:=` declares; a bare identifier on the
+        // right is a genuine use.
+        let src = "package p\n\nfunc F() {\n\tx := 1\n\ty := x\n\t_ = y\n\t_ = x\n}\n";
+        let refs = extract(src, Language::Go).expect("go").refs;
+        let xs: Vec<_> = refs
+            .iter()
+            .filter(|r| r.kind == RefKind::NameRef && r.name == "x")
+            .collect();
+        assert_eq!(xs.len(), 2, "rhs of `y := x` and `_ = x` are both uses");
+    }
+
+    #[test]
+    fn type_alias_and_named_type_targets_are_references() {
+        let src = "package p\n\ntype UUID string\n\ntype Widget2 struct{}\n\ntype ID = UUID\n\ntype Store Widget2\n";
+        let refs = extract(src, Language::Go).expect("go").refs;
+        let names: Vec<&str> = refs
+            .iter()
+            .filter(|r| r.kind == RefKind::TypeRef)
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["UUID", "Widget2"],
+            "alias/named-type targets are uses, only the defined name is a declaration"
+        );
+    }
+
+    #[test]
+    fn spec_doc_overrides_group_doc() {
+        // A comment on the group header must not suppress the per-spec doc
+        // immediately above the spec (the ModeFast regression).
+        let defs = defs_of(
+            "package p\n\n// Modes for the parser.\nconst (\n\t// ModeFast skips validation.\n\tModeFast = iota\n\tModeSlow\n)\n",
+        );
+        let fast = defs.iter().find(|d| d.name == "ModeFast").expect("spec");
+        assert_eq!(fast.doc.as_deref(), Some("ModeFast skips validation."));
+        let slow = defs.iter().find(|d| d.name == "ModeSlow").expect("spec");
+        assert_eq!(
+            slow.doc, None,
+            "no per-spec comment: the group comment is not adjacent, so no doc"
+        );
+    }
+
+    #[test]
+    fn raw_string_imports_are_captured() {
+        let src = "package p\n\nimport `fmt`\n\nfunc F() { fmt.Println(1) }\n";
+        let file = extract(src, Language::Go).expect("go");
+        assert_eq!(file.imports.len(), 1);
+        assert_eq!(file.imports[0].raw, "fmt");
+        // The qualifier still rides structurally on the selected call.
+        let println = file
+            .refs
+            .iter()
+            .find(|r| r.name == "Println")
+            .expect("qualified call");
+        assert_eq!(println.qualifier.as_deref(), Some("fmt"));
+    }
+
+    #[test]
+    fn compiler_directives_are_not_docs() {
+        // A directive directly above the func is not the doc...
+        let defs = defs_of("package p\n\n//go:noinline\nfunc A() {}\n");
+        assert_eq!(defs[0].doc, None);
+
+        // ...and a directive between the doc and the func (gofmt's
+        // preferred placement) does not break doc adjacency.
+        let defs = defs_of("package p\n\n// B does things.\n//go:noinline\nfunc B() {}\n");
+        assert_eq!(defs[0].doc.as_deref(), Some("B does things."));
     }
 }

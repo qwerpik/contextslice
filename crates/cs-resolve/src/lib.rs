@@ -85,6 +85,10 @@ pub enum UnresolvedReason {
     /// The specifier names a directory that has no Go files (or does not
     /// exist) — a dangling or wrong-path import (ADR-018).
     NotFound,
+    /// The target is an `internal/` package outside the importer's
+    /// visibility tree (Go's internal rule): the code could not compile, so
+    /// the dependency does not exist for this importer.
+    Internal,
     /// The target exists conceptually but this adapter does not model it yet.
     Unsupported,
 }
@@ -226,7 +230,12 @@ pub enum UnboundReason {
     /// The name is used through a package qualifier that resolved outside
     /// the repository (stdlib/third-party) — nothing to bind to, by design.
     ExternalScope,
-    /// A selector's operand matched no import qualifier known to the file.
+    /// A call whose receiver is a computed expression (`w.Header().Add`,
+    /// `arr[0].Close`): the selector's operand is not a plain identifier,
+    /// so the receiver's package is unknowable without type information.
+    /// Emitted since the Ref qualifier became structural (ADR-017 addendum);
+    /// previously these fell into bare-call binding and produced false
+    /// edges into same-named local methods.
     NoScope,
     /// A bare method call whose name is defined on several types in the
     /// package; receiver type information would be required.
@@ -317,8 +326,10 @@ pub struct ResolutionStats {
     pub refs_unbound: u64,
     /// Names skipped because they had too many candidate definitions.
     pub names_skipped: u64,
-    /// Name refs that were package-qualifier occurrences (`pkg` of
-    /// `pkg.Foo`) — resolved as package references, not definitions.
+    /// References whose recorded selector qualifier names an import scope
+    /// of the file — in-repo or external (`auth.Session`, `fmt.Println`;
+    /// ADR-017 addendum: the qualifier rides structurally on the reference,
+    /// it is no longer an independent name ref).
     pub package_qualifier_refs: u64,
     /// Why each unbound reference stayed unbound (ADR-018's honesty
     /// contract: unbound is a documented behavior with a reason).

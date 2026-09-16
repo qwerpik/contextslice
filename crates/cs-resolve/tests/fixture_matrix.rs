@@ -252,9 +252,6 @@ fn unique_methods_bind_and_ambiguous_methods_do_not() {
     let check = binding_of(&repo, "meth/use.go", "Check", RefKind::CallRef);
     assert_bound_to_file(&check, "meth/types.go");
     assert_eq!(check.targets[0].qual_name, "C.Check");
-    for r in &["Name", "Name"] {
-        let _ = r;
-    }
     // Two distinct refs named Name (lines differ) — both ambiguous.
     let names: Vec<_> = file(&repo, "meth/use.go")
         .refs
@@ -265,6 +262,90 @@ fn unique_methods_bind_and_ambiguous_methods_do_not() {
     for (_, b) in names {
         assert_eq!(b.unbound_reason, Some(UnboundReason::MethodAmbiguous));
     }
+}
+
+#[test]
+fn chained_selector_calls_are_never_local_methods() {
+    // `Make().Solo()` — the operand is a computed expression, so the call
+    // cannot be claimed as this package's method even though `Solo` is
+    // unique here (the chi `w.Header().Add` → `RouteParams.Add` trap).
+    let repo = resolved();
+    let chained = binding_of(&repo, "meth/use.go", "Solo", RefKind::CallRef);
+    // The FIRST Solo ref in source order is the chained one.
+    assert_eq!(chained.unbound_reason, Some(UnboundReason::NoScope));
+    // The identifier-operand call `d.Solo()` binds normally.
+    let direct: Vec<_> = file(&repo, "meth/use.go")
+        .refs
+        .iter()
+        .filter(|(r, _)| r.name == "Solo" && r.kind == RefKind::CallRef)
+        .collect();
+    assert_eq!(direct.len(), 2, "chained + identifier-operand call");
+    assert_bound_to_file(&direct[1].1, "meth/types.go");
+}
+
+#[test]
+fn unknown_receiver_testing_surface_names_stay_unbound() {
+    // `t.Run("x", nil)` — `Run` is unique in the meth package, but `t` is
+    // an unknown receiver: the name is on testing.T's surface (the gin
+    // `t.Run` → `Engine.Run` trap), so it stays unbound.
+    let repo = resolved();
+    let run = binding_of(&repo, "meth/use.go", "Run", RefKind::CallRef);
+    assert_eq!(run.unbound_reason, Some(UnboundReason::UniverseMethod));
+}
+
+#[test]
+fn major_version_imports_qualify_by_module_name_not_version() {
+    // `import "github.com/x/inner/v2"` + `inner.Thing()`: the qualifier is
+    // `inner` (the module name), never `v2` — so the selector resolves to
+    // an external scope instead of falling through as an unknown operand.
+    let repo = resolved();
+    let thing = binding_of(&repo, "main.go", "Thing", RefKind::CallRef);
+    assert_eq!(thing.unbound_reason, Some(UnboundReason::ExternalScope));
+}
+
+#[test]
+fn internal_packages_follow_go_visibility() {
+    let repo = resolved();
+    // Inside the parent tree: the import resolves and binds.
+    assert_eq!(
+        import_resolution(
+            &repo,
+            "deep/tools/tool.go",
+            "example.com/m/v2/deep/tools/internal/priv"
+        ),
+        Resolution::Resolved("deep/tools/internal/priv".to_owned())
+    );
+    let grant = binding_of(&repo, "deep/tools/tool.go", "Grant", RefKind::CallRef);
+    assert_bound_to_file(&grant, "deep/tools/internal/priv/priv.go");
+    // Outside the parent tree: the import could not compile — Unresolved,
+    // and nothing binds through it.
+    assert_eq!(
+        import_resolution(
+            &repo,
+            "outside/o.go",
+            "example.com/m/v2/deep/tools/internal/priv"
+        ),
+        Resolution::Unresolved {
+            specifier: "example.com/m/v2/deep/tools/internal/priv".to_owned(),
+            reason: UnresolvedReason::Internal,
+        }
+    );
+    let sneak = binding_of(&repo, "outside/o.go", "Grant", RefKind::CallRef);
+    assert_eq!(sneak.unbound_reason, Some(UnboundReason::ExternalScope));
+}
+
+#[test]
+fn package_main_does_not_hijack_its_directory() {
+    // `mixed/` holds `package main` and `package util`; importers must
+    // bind the importable `util`, never the command.
+    let repo = resolved();
+    let mixed = binding_of(&repo, "main.go", "Mixed", RefKind::CallRef);
+    assert_bound_to_file(&mixed, "mixed/util.go");
+    // And no edge from the importer lands in the main-package file.
+    assert!(!repo
+        .edges
+        .iter()
+        .any(|e| e.src == "main.go" && e.dst == "mixed/main.go"));
 }
 
 #[test]
@@ -308,18 +389,38 @@ fn type_refs_bind_unqualified_and_qualified() {
 }
 
 #[test]
-fn qualifier_occurrences_are_counted_not_bound() {
+fn package_scoped_refs_carry_structural_qualifiers() {
     let repo = resolved();
+    // ADR-017 addendum: the qualifier of `pkg.Foo` rides on the reference
+    // itself; the operand is never an independent ref.
     let f = file(&repo, "main.go");
-    // `auth`, `fs`, `fmt`, `dep`, `nothere`, `types`, `helpersvc` occur as
-    // qualifiers; none of them is in the refs list at all.
-    for name in ["auth", "fs", "fmt", "dep", "nothere", "types", "helpersvc"] {
-        assert!(
-            !f.refs.iter().any(|(r, _)| r.name == name),
-            "{name} should be a counted qualifier occurrence, not a ref"
-        );
-    }
-    assert!(repo.stats.package_qualifier_refs >= 7);
+    let login = binding_of(&repo, "main.go", "Login", RefKind::CallRef);
+    assert_bound_to_file(&login, "auth/session.go");
+    let login_ref = f
+        .refs
+        .iter()
+        .find(|(r, _)| r.name == "Login" && r.kind == RefKind::CallRef)
+        .expect("login ref");
+    assert_eq!(login_ref.0.qualifier.as_deref(), Some("auth"));
+    let println = f
+        .refs
+        .iter()
+        .find(|(r, _)| r.name == "Println" && r.kind == RefKind::CallRef)
+        .expect("println ref");
+    assert_eq!(println.0.qualifier.as_deref(), Some("fmt"));
+    // Instance receivers are recorded the same way — scope is the
+    // resolver's decision, not extraction's.
+    let exists = f
+        .refs
+        .iter()
+        .find(|(r, _)| r.name == "Exists" && r.kind == RefKind::CallRef)
+        .expect("fs call");
+    assert_eq!(exists.0.qualifier.as_deref(), Some("fs"));
+    assert!(
+        repo.stats.package_qualifier_refs >= 7,
+        "package-scoped refs must be counted, got {}",
+        repo.stats.package_qualifier_refs
+    );
 }
 
 #[test]

@@ -49,19 +49,9 @@
   ],
   "refs": [
     {
-      "name": "sync",
-      "kind": "name_ref",
-      "span": {
-        "start_line": 14,
-        "end_line": 14,
-        "start_byte": 352,
-        "end_byte": 356
-      },
-      "container": "Guarded"
-    },
-    {
       "name": "Mutex",
       "kind": "type_ref",
+      "qualifier": "sync",
       "span": {
         "start_line": 14,
         "end_line": 14,

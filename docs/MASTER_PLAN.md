@@ -579,6 +579,8 @@ holds. Steps 1–9 are Phase 0+1, steps 10–15 are Phase 2.
 | 016 | Reconnaissance findings rejected, with reasons and reopen triggers | Rejected findings must stay rejected on the record |
 | 017 | Extraction contract as built: package_name, ref kinds, exported, import aliases, normative degradation policy | Implementing the Go adapter resolved nine open contract questions (ADR-017) |
 | 018 | Go resolver: filesystem-only, package identity (dir, name), unique-only methods + universe-method filter, honest unbound reasons | Every approximation measured on gin/chi before freezing (ADR-018) |
+| 019 | Foundation recovery: audit fixes accepted (E1–E8), four findings refuted on evidence, scaling claims corrected by measurement | Nothing is accepted or refuted from the page — each item settled by probe, test, or measurement (ADR-019) |
+| 020 | `Ref.qualifier` structural, operands suppressed, rule table over the qualifier | Selector relationships are syntax: read them where the tree is in hand, never guessed from byte distance (ADR-020) |
 
 Full records live in [`docs/adr/`](adr/) — see the [ADR index](adr/README.md). ADR-011
 through ADR-016 were produced by the bootstrap verification pass: they record what was
@@ -654,3 +656,53 @@ ARCHITECTURE §5 incl. the resolver's bindings/edges, content-hash
 incremental updates, snapshot ids, FTS5). The resolver now produces
 everything the index persists (`ResolvedRepo` with per-file bindings and
 damped edges); nothing in resolution blocks it.
+
+### 2026-09-16 — Foundation Recovery complete (post–step-4 hardening pass)
+
+**What was done:** every finding of the independent 50-item adversarial
+audit (`docs/reviews/gemini-independent-audit.md`) dispositioned by
+execution, not argument — accepted fixes E1–E8, empirically refuted
+findings (F-21, F-43, F-26, F-40), and measured corrections to our own
+claims, all recorded in [ADR-019](adr/ADR-019-foundation-recovery.md)
+with the qualifier contract split into
+[ADR-020](adr/ADR-020-ref-qualifier-addendum.md). Highlights: scanner
+as-built hardening (`.git` exclusion, walk-time caps, read cap, mtime,
+string-sort ordering); the parse timeout actually enforced (tree-sitter
+progress callback → `ParseStatus::Timeout`); extraction facts fixed
+(complete 44-name sorted universe, `:=` left-only, alias/named-type
+targets, doc override, raw-string imports, `//go:`-adjacent docs, generic
+calls as `call_ref`); `Ref.qualifier` made structural with operand
+suppression, deleting the resolver's byte-distance qualifier heuristic;
+`no_scope` revived for computed operands; resolver robustness (`/vN`
+fallback, `go.mod` comment/tab parsing, exact manifest match, dir→packages
+index, `main` exclusion, `Run` in the universe list, ambiguity-after-
+test-visibility, `internal/` visibility as `UnresolvedReason::Internal`,
+dampener as a returned flag — atomics deleted); three quadratics removed
+(`container_for`, `collect_defs`, `only_directive_lines`: 1 MiB extraction
+11.6 s → ~270–340 ms, linear); CLI `mcp --stdio` bare flag and
+no-artifact-on-failure pinned; BENCHMARK §4.2's mathematically wrong
+McNemar power table recomputed exactly (script inline in the doc).
+
+**Headline evidence:**
+
+- Golden regeneration audited line-by-line: **PASS** with zero unexplained
+  hunks (`docs/reviews/golden_diff_audit.md`).
+- Gin/chi gates re-passed at pinned SHAs (gin `5c6a15f8…`, chi
+  `b1c9ab47…`): in-repo imports 100%/100%, 152 sampled bindings 0 false
+  positives (Wilson LB ≈ 97.5%), coverage 23.3%/18.4%
+  (`docs/benchmarks/resolver-gin-chi.md`).
+- Property tests: three proptest suites × 256 cases (arbitrary bytes,
+  Go-shaped mixtures, resolver graphs).
+- Scaling measured, not assumed (`docs/benchmarks/scaling_report.md`):
+  cold 10k pipeline **9.72 s** single-threaded (budget 60 s); peak RSS
+  **3.30 GiB @ 50k** — the ARCHITECTURE §8 "<1 GB @50k" target is
+  **exceeded** by the current materializing API, so **streaming is
+  mandatory in cs-index**; the resolver's claimed "~100 s @10k" is
+  refuted (sub-second).
+
+**Next bottleneck:** §15 step 5 — `cs-index`, **streaming-first**: the
+measured 3.30 GiB @ 50k rules out build-then-persist; the index must
+extract/resolve in batches, write incrementally, and drop in-memory state.
+The ARCHITECTURE §5 schema (incl. `refs.qualifier`, `refs.kind=call_ref`,
+`parse_status=timeout`, `imports.resolved_dir`/`resolved_file`) is frozen
+as the load-bearing contract for that work.

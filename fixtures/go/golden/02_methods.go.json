@@ -66,6 +66,7 @@
     {
       "name": "Session",
       "kind": "type_ref",
+      "qualifier": null,
       "span": {
         "start_line": 11,
         "end_line": 11,
@@ -75,19 +76,9 @@
       "container": "Session.Validate"
     },
     {
-      "name": "s",
-      "kind": "name_ref",
-      "span": {
-        "start_line": 12,
-        "end_line": 12,
-        "start_byte": 228,
-        "end_byte": 229
-      },
-      "container": "Session.Validate"
-    },
-    {
       "name": "ttl",
       "kind": "field_ref",
+      "qualifier": "s",
       "span": {
         "start_line": 12,
         "end_line": 12,
@@ -99,6 +90,7 @@
     {
       "name": "Session",
       "kind": "type_ref",
+      "qualifier": null,
       "span": {
         "start_line": 16,
         "end_line": 16,
@@ -108,19 +100,9 @@
       "container": "Session.Refresh"
     },
     {
-      "name": "s",
-      "kind": "name_ref",
-      "span": {
-        "start_line": 17,
-        "end_line": 17,
-        "start_byte": 321,
-        "end_byte": 322
-      },
-      "container": "Session.Refresh"
-    },
-    {
       "name": "ttl",
       "kind": "field_ref",
+      "qualifier": "s",
       "span": {
         "start_line": 17,
         "end_line": 17,
@@ -132,6 +114,7 @@
     {
       "name": "delta",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 17,
         "end_line": 17,
@@ -143,6 +126,7 @@
     {
       "name": "Session",
       "kind": "type_ref",
+      "qualifier": null,
       "span": {
         "start_line": 20,
         "end_line": 20,
@@ -152,19 +136,9 @@
       "container": "Session.private"
     },
     {
-      "name": "s",
-      "kind": "name_ref",
-      "span": {
-        "start_line": 21,
-        "end_line": 21,
-        "start_byte": 374,
-        "end_byte": 375
-      },
-      "container": "Session.private"
-    },
-    {
       "name": "UserID",
       "kind": "field_ref",
+      "qualifier": "s",
       "span": {
         "start_line": 21,
         "end_line": 21,

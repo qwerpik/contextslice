@@ -1,17 +1,18 @@
 {
-  "resolved": 8,
-  "external": 7,
-  "unresolved": 2,
-  "refs_bound": 27,
-  "refs_unbound": 44,
+  "resolved": 10,
+  "external": 8,
+  "unresolved": 3,
+  "refs_bound": 35,
+  "refs_unbound": 39,
   "names_skipped": 0,
-  "package_qualifier_refs": 14,
+  "package_qualifier_refs": 18,
   "unbound_reasons": {
-    "no_candidate": 30,
-    "external_scope": 7,
+    "no_candidate": 21,
+    "external_scope": 9,
+    "no_scope": 1,
     "method_ambiguous": 2,
     "ambiguous_dot_import": 1,
     "needs_type_info": 3,
-    "universe_method": 1
+    "universe_method": 2
   }
 }

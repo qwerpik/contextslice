@@ -36,9 +36,12 @@ of the cache beyond filesystem permissions.
 
 ## 3. Network and telemetry policy
 
-- Static analysis of the release binaries must show **zero network syscalls** — verified
-  in CI by sandboxed strace-based tests that index a repo and produce a slice with
-  networking blocked (any socket attempt fails the build).
+- Static analysis of the release binaries must show **zero network syscalls** —
+  **planned, not current**: the strace-based sandboxed CI test (index a repo,
+  produce a slice, networking blocked, any socket attempt fails the build) is
+  owned by the hardening milestone (MASTER_PLAN §15 step 15, v0.1), when the
+  full pipeline exists to be traced. The zero-network property itself is
+  structural today: no crate in the workspace declares a network client.
 - No update checker. Version checks are the user's `contextslice version` and package
   manager.
 - The MCP server speaks stdio only; binding to TCP is not implemented (if ever added, it
@@ -94,10 +97,21 @@ instructions", doc-strings with fake directives, identifier names like
 
 ## 6. Parser and filesystem safety (malicious repositories)
 
-- **Parsing:** tree-sitter is memory-safe (Rust bindings over a heavily fuzzed C core);
-  grammars are pinned (§10). Per-file **parse timeout (250 ms) and node budget**
-  prevent pathological-grammar DoS; files > 1 MiB are not parsed at all
-  (ARCHITECTURE §4.2).
+- **Parsing (as implemented, 2026-09-16):** tree-sitter is memory-safe (Rust
+  bindings over a heavily fuzzed C core); grammars are pinned (§10). The
+  per-file **parse timeout (250 ms) is enforced inside tree-sitter** via its
+  parse progress callback (`ParseOptions`): an over-budget parse is aborted
+  cooperatively and the file is labeled `ParseStatus::Timeout` with no
+  extracted facts — a labeled degradation, never a hang (ADR-019 §D/E2).
+  There is no node budget: a node-count cap cannot be enforced without
+  re-implementing the parser's scheduler, so what is actually enforced is
+  the **1 MiB input cap** (larger files are never parsed) plus the wall-clock
+  parse budget, with post-parse fact collection **linear** in the capped
+  input (measured worst ~0.34 s at the cap, after the `only_directive_lines`
+  quadratic was removed — `docs/benchmarks/scaling_report.md`). Exactly what
+  is enforced, in one line: *no file above 1 MiB is parsed; no parse runs
+  longer than 250 ms; everything after the parse is linear in a capped
+  input.*
 - **Traversal:** `ignore`-crate walker with symlink-loop detection; path canonicalization
   before any open; repo-relative paths validated to not escape the root (`..`
   rejection, symlink-escape checks); hard cap on total files (default 500k) and total
@@ -107,9 +121,14 @@ instructions", doc-strings with fake directives, identifier names like
    craft "SQL" — it only supplies bound-parameter values.
 - **Git:** via libgit2 with fixed argument construction — never a shell; object-size
    caps respected; `--no-git` fully disables.
-- **Resource exhaustion:** memory ceiling for the in-memory graph; OOM-kill-safe
-   streaming extraction; CI fuzz targets (`cargo fuzz`) on the parser entry points for
-   all shipped grammars, run nightly.
+- **Resource exhaustion:** memory ceiling for the in-memory graph; the 50k-file
+  RSS measurement (3.30 GiB materializing — `docs/benchmarks/scaling_report.md`)
+  makes the streaming design mandatory in cs-index (ARCHITECTURE §8).
+  **Planned, not current:** CI fuzz targets (`cargo fuzz`) on the parser entry
+  points for all shipped grammars, run nightly — owning phase: cs-index
+  (MASTER_PLAN §15 step 5), which is when the parser entry points stop
+  changing; until then the property tests (arbitrary-bytes extraction, 256
+  cases per suite) are the standing adversarial input coverage.
 
 ## 7. Data storage and cache hygiene
 

@@ -75,9 +75,13 @@ tokenization for measurement (tiktoken o200k), and identical repo snapshots.
 For each (task, variant, budget):
 
 - **Recall@budget** — primary, two grades:
-  - `recall_strong` = |gold.code ∪ gold.test included at ≥ L4| / |gold ∪ gold.test|
+  - `recall_strong` = |gold.code ∪ gold.test included at ≥ L4| / |gold.code ∪ gold.test|
+    (the denominator is the strong-grade universe itself: `gold.config` is capped at
+    L3 by design and can never appear in the numerator, so counting it in the
+    denominator would bias every reported strong recall downward by an amount
+    unrelated to selection quality)
   - `recall_weak` = |gold at ≥ L2| / |gold| (declaration-level visibility counts as
-    "found")
+    "found"; this grade deliberately includes `gold.config` in the denominator)
 - **Precision** = tokens spent on gold files (and 1-hop neighbors of gold, since
   supporting context is legitimately useful) ÷ total slice tokens. Reported alongside
   recall because ContextBench found agents over-favor recall; we optimize the frontier,
@@ -134,25 +138,74 @@ point of the harness) — this is a *pre-marketing* gate, not a post-launch apol
   Go/TS tasks use our own corpus tooling (§3.1).
 - **Sample size is computed before the run, not after.** Paired designs are far less
   efficient than they look when the outcome is binary and the arms agree on most tasks.
-  Our exact two-sided McNemar computation (α = 0.05) for a *true* 12-point success-rate
-  effect gives:
+  Our McNemar power computation (exact, two-sided, α = 0.05) for a *true* 12-point
+  marginal success-rate effect gives:
 
   | tasks (n) | discordant 15% | discordant 30% | discordant 50% |
   |---|---|---|---|
-  | 50 | 2% | 4% | 6% |
-  | 100 | 4% | 7% | 11% |
-  | 200 | 7% | 13% | 20% |
-  | 400 | 13% | 23% | 37% |
+  | 50 | 47% | 26% | 16% |
+  | 100 | 89% | 53% | 35% |
+  | 200 | >99% | 86% | 64% |
+  | 400 | ≈100% | 99% | 92% |
 
-  The discordant-pair rate is the dominant term, and it is unknown until we run, so the
-  procedure is: run a pilot to estimate it, then size the reported run for ≥80% power on
-  the effect we intend to claim. **A 50-task run cannot support any correctness claim** —
-  publishing one would be reporting noise. This is also why the extrinsic tier is a
-  nightly job rather than a PR gate.
-- The published counterexample (Graft, §6) reports a 12-point effect at n = 50. Under the
-  table above that result is consistent with a true effect and also with no effect; we
-  cite it as evidence that the *category* measures outcomes, not as evidence that context
-  selection works.
+  An earlier version of this table showed the *inverted* trend (power rising with the
+  discordant rate, values as low as 2% at n = 50). That table was wrong twice over:
+  2% power at α = 0.05 is impossible against a true effect — an unbiased level-α test
+  has power ≥ the size of its largest rejection region — and its errors treated the
+  12-point effect as a 12-point *conditional* difference among discordant pairs
+  (p_win ≈ 0.56) instead of a marginal difference. Parameterized correctly, the
+  conditional win rate is p_win = 0.5 + 0.12/(2·p_d) — e.g. 0.90 at p_d = 0.15 — and
+  the trend reverses: **for a fixed marginal effect, a higher discordant rate LOWERS
+  power**, because the expected win surplus (n·p_d·(p_win − 0.5) = n·0.12/2) is
+  constant while the noise (√(n·p_d)/2) grows with √p_d. The discordant rate is the
+  dominant unknown until we run, so the procedure stands: pilot to estimate it, then
+  size the reported run for ≥80% power. At a plausible p_d = 0.30 that takes **n ≈
+  200**; **a 50-task run is underpowered for any claim (≈16–47% power here)** —
+  publishing one as a headline result would be reporting noise. This is also why the
+  extrinsic tier is a nightly job rather than a PR gate. The computation, exactly as
+  run to produce the table (deterministic, standard library only):
+
+  ```python
+  #!/usr/bin/env python3
+  """Exact McNemar power for a marginal 12-point effect.
+
+  D ~ Bin(n, p_d) discordant pairs; given D = d, wins B ~ Bin(d, p_win)
+  with p_win = 0.5 + delta/(2*p_d), which makes the MARGINAL success-rate
+  difference exactly delta. Reject by the exact two-sided binomial test
+  of B against Bin(d, 0.5) at alpha = 0.05 (method of small p-values).
+  power = E_D[ P(reject | D, p_win) ], computed exactly, not simulated.
+  """
+  from math import comb
+
+  def binom_pmf(k, n, p):
+      if k < 0 or k > n: return 0.0
+      return comb(n, k) * (p ** k) * ((1 - p) ** (n - k))
+
+  def pvalue_two_sided(b, d):
+      pmf0 = [binom_pmf(k, d, 0.5) for k in range(d + 1)]
+      return sum(pk for pk in pmf0 if pk <= pmf0[b] + 1e-15)
+
+  REJECT = {d: [b for b in range(d + 1) if pvalue_two_sided(b, d) <= 0.05]
+            for d in range(401)}
+
+  def power(n, p_d, delta=0.12):
+      p_win = 0.5 + delta / (2.0 * p_d)
+      return sum(binom_pmf(d, n, p_d) *
+                 sum(binom_pmf(b, d, p_win) for b in REJECT[d])
+                 for d in range(n + 1))
+
+  for n in (50, 100, 200, 400):
+      print(n, " ".join(f"{power(n, p_d):.3f}" for p_d in (0.15, 0.30, 0.50)))
+  ```
+
+  Note the exact test is conservative at small d (its effective size at d = 7 is
+  0.0156, not 0.05 — discreteness), which the exact computation above accounts for
+  and a normal approximation would not.
+- The published counterexample (Graft, §6) reports a 12-point effect at n = 50. Under
+  the table above that run carries ≈16–47% power (depending on the unknown discordant
+  rate) — a true effect would often survive, but a null result at that size supports
+  no conclusion either way; we cite it as evidence that the *category* measures
+  outcomes, not as evidence that context selection works.
 
 ### 4.3 Metrics
 
@@ -189,7 +242,7 @@ The negative-results section is mandatory — it is also our tuning signal.
 | **ContextBench** (arXiv 2602.05892, verified 2026-09-15) | 1,136 tasks, 66 repos, 8 languages, human-annotated gold contexts; public fixed-harness leaderboard with **Recall, Pass@1, Context F1 and cost** | Our intrinsic metrics align deliberately (recall/precision/efficiency framing); cross-evaluating ContextSlice on their public gold contexts is a Phase 6 goal — third-party gold sets are the strongest credibility signal. **Two cautions.** (1) Their abstract scopes the work as one that *"augments existing end-to-end benchmarks with intermediate gold-context metrics"*, so we must not cite it as a substitute for outcome evaluation; its Pass@1 column exists but their contribution is the retrieval-centric process signal. (2) Their findings are load-bearing *for* us and must be engaged honestly: sophisticated scaffolding yields only marginal retrieval gains; LLMs favour recall over precision, introducing noise; balanced retrieval achieves higher accuracy at lower cost; and retrieved context is often never used in the final solution. |
 | **SWE-ContextBench** (arXiv 2602.08316, verified 2026-09-15) | 1,100 base + 376 related tasks across 51 repos / 9 languages; measures resolution accuracy, runtime and token cost under context-reuse strategies, comparing **named shipped context tools — specifically agent *memory* frameworks (Mem0, LangMem, Supermemory, OpenViking), not repository packers** | Partially validates our thesis and partially constrains it. It supports the core mechanism — *"accurately summarized and retrieved previous experience can significantly improve resolution accuracy and reduce runtime and token cost… unfiltered or incorrectly selected context provides limited or negative benefits"* — which is the strongest published evidence that context **selection** quality moves outcomes. But it also means "nobody evaluates context tools on outcomes" is **false**, so we must not make that claim (see §7). Our extrinsic tier adapts its cost-accounting. |
 | **SWE-bench (Verified/Lite)** | Issue → patch, fail-to-pass judging | Source of Python extrinsic tasks; we do not claim SWE-bench leaderboard comparability (different scaffold) |
-| **Graft** (trailhq/Graft, MIT) | Graph CLI/MCP; publishes **SWE-bench Verified** results (official `swebench` 4.1.0 grader, n=50, +12 pts correctness, +23% tokens) alongside a self-run controlled sweep | One of several counterexamples to "nobody publishes agent outcomes" (verified 2026-09-15; see §7 for the others, which are stronger). Two limits matter for this one: its controlled-sweep harness was removed from the public repo (CHANGELOG v0.7.0, "The `bench/` benchmark harness is no longer part of the published repo"), and n=50 is severely underpowered — our own exact two-sided McNemar computation puts the power to detect a true 12-point effect at n=50 at only **2–6%** (depending on the discordant-pair rate; see §4.2). **Consequence for us:** publish the harness, corpus manifests, seeds and per-task logs, and size the extrinsic tier for the effect we intend to claim (§4.2). "First to publish" is not a claim we make; being checkable is. |
+| **Graft** (trailhq/Graft, MIT) | Graph CLI/MCP; publishes **SWE-bench Verified** results (official `swebench` 4.1.0 grader, n=50, +12 pts correctness, +23% tokens) alongside a self-run controlled sweep | One of several counterexamples to "nobody publishes agent outcomes" (verified 2026-09-15; see §7 for the others, which are stronger). Two limits matter for this one: its controlled-sweep harness was removed from the public repo (CHANGELOG v0.7.0, "The `bench/` benchmark harness is no longer part of the published repo"), and n=50 is severely underpowered — our own exact two-sided McNemar computation puts the power to detect a true 12-point effect at n=50 at only **≈16–47%** (depending on the discordant-pair rate; see §4.2; an earlier draft of that table said 2–6% and was mathematically wrong — corrected 2026-09-16). **Consequence for us:** publish the harness, corpus manifests, seeds and per-task logs, and size the extrinsic tier for the effect we intend to claim (§4.2). "First to publish" is not a claim we make; being checkable is. |
 | **Aider polyglot** | 225 Exercism exercises, edit-format focused | Not used: exercises are self-contained single files — context selection is untested by construction |
 | **Terminal-bench** | Docker terminal tasks | Out of scope; no repo-context manipulation |
 

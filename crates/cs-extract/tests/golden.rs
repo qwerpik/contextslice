@@ -167,15 +167,18 @@ fn degraded_files_have_defined_behavior() {
     assert_eq!(f.status, ParseStatus::Partial);
     assert!(f.defs.is_empty(), "half a signature is not a def");
 
-    // Python in a .go file: honest label, no defs, no package. Refs may
-    // survive where tree-sitter recovered a clean subtree (the golden pins
-    // exactly what: the `print("hi")` call).
+    // Python in a .go file: honest label, no defs, no package, no refs —
+    // tree-sitter recovers the `print("hi")` call, but `print` is a Go
+    // predeclared identifier and can never bind to a repository def, so the
+    // universe filter drops it (the golden pins the empty ref set).
     let f = read("25_garbage.go");
     assert_eq!(f.status, ParseStatus::Partial);
     assert!(f.defs.is_empty() && f.imports.is_empty());
     assert!(f.package_name.is_none());
-    let names: Vec<&str> = f.refs.iter().map(|r| r.name.as_str()).collect();
-    assert_eq!(names, vec!["print"]);
+    assert!(
+        f.refs.is_empty(),
+        "only a universe name could survive recovery"
+    );
 
     // Empty and package-only files are Ok, not Partial.
     let f = read("23_empty.go");

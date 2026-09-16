@@ -51,6 +51,7 @@
     {
       "name": "localC",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 17,
         "end_line": 17,
@@ -62,6 +63,7 @@
     {
       "name": "localV",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 18,
         "end_line": 18,
@@ -73,6 +75,7 @@
     {
       "name": "localV2",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 19,
         "end_line": 19,
@@ -84,6 +87,7 @@
     {
       "name": "localT",
       "kind": "type_ref",
+      "qualifier": null,
       "span": {
         "start_line": 20,
         "end_line": 20,

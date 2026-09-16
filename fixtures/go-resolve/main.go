@@ -8,6 +8,8 @@ import (
 	"example.com/m/v2/types"
 	"example.com/m/v2/nothere"
 	"example.org/dep"
+	"github.com/x/inner/v2"
+	util "example.com/m/v2/mixed"
 	_ "embed"
 )
 
@@ -23,6 +25,8 @@ func Run() error {
 	var w types.Widget
 	_ = w
 	dep.Do()
+	inner.Thing() // external, major-version path: qualifier must be `inner`, not `v2`
+	util.Mixed() // the dir also holds package main; the clause name wins
 	fmt.Println(Version)
 	ping()
 	return nothere.Missing()

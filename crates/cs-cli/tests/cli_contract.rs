@@ -68,20 +68,6 @@ fn unimplemented_command_exits_four_and_names_the_roadmap_step() {
 }
 
 #[test]
-fn slice_keeps_stdout_empty_when_it_fails() {
-    // Diagnostics go to stderr, so a pipeline never receives error text as if it
-    // were an artifact. This is the "stdout is sacred" rule under failure.
-    let dir = tempfile::tempdir().expect("tempdir");
-    contextslice()
-        .current_dir(dir.path())
-        .args(["slice", "fix the auth timeout"])
-        .assert()
-        .code(3)
-        .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::is_empty().not());
-}
-
-#[test]
 fn doctor_reports_index_state_on_stderr_with_empty_stdout() {
     let dir = tempfile::tempdir().expect("tempdir");
     contextslice()
@@ -94,13 +80,27 @@ fn doctor_reports_index_state_on_stderr_with_empty_stdout() {
         .stderr(predicate::str::contains("index present: no"));
 }
 
-/// Writing an artifact must succeed and land on stdout exactly.
-///
-/// Exercises the real binary's output path with `--out -`, which is the
-/// documented spelling for "stdout". During bootstrap the only command that
-/// writes an artifact is `slice`, and it fails after writing because the
-/// selection engine does not exist yet -- so this asserts the *contract that
-/// holds today* rather than pretending the happy path is reachable.
+#[test]
+fn slice_keeps_stdout_empty_when_it_fails() {
+    // Diagnostics go to stderr, so a pipeline never receives error text as if it
+    // were an artifact. This is the "stdout is sacred" rule under failure — and
+    // it must hold on the *deep* failure path (index present, selection engine
+    // missing), not just the trivial no-index one.
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join(".contextslice")).expect("mkdir");
+    contextslice()
+        .current_dir(dir.path())
+        .args(["slice", "fix the auth timeout"])
+        .assert()
+        .code(4)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::is_empty().not());
+}
+
+/// `--out -` is the documented spelling for "stdout" and must parse and route
+/// there. During bootstrap the slice command fails before any artifact exists —
+/// and a failing command must leave stdout empty rather than emit a
+/// placeholder a piped consumer could mistake for a slice.
 #[test]
 fn out_dash_means_stdout() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -110,13 +110,16 @@ fn out_dash_means_stdout() {
         .current_dir(dir.path())
         .args(["slice", "any task", "--out", "-"])
         .assert()
-        .code(4) // no selection engine yet; the write path itself must not fail
+        .code(4) // no selection engine yet
+        .stdout(predicate::str::is_empty())
         .stderr(predicate::str::contains("not implemented"));
 }
 
-/// `--out <file>` writes to the file and must not create a literal `-`.
+/// `--out <file>` is accepted, and a failing command must NOT create the file:
+/// an artifact on disk from a failed run is the same poison as placeholder
+/// stdout, just slower to notice.
 #[test]
-fn out_file_is_created_and_named_correctly() {
+fn out_file_is_not_created_when_the_command_fails() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(dir.path().join(".contextslice")).expect("mkdir");
     let target = dir.path().join("slice.md");
@@ -128,11 +131,25 @@ fn out_file_is_created_and_named_correctly() {
         .code(4);
 
     assert!(
-        target.exists(),
-        "the artifact file must be created before the stage error"
+        !target.exists(),
+        "a failed slice must not write the artifact"
     );
     assert!(
         !dir.path().join("-").exists(),
         "`-` must never be treated as a literal filename"
     );
+}
+
+/// The documented `contextslice mcp [--stdio]` spelling (MASTER_PLAN §6.1)
+/// must parse. A previous flag configuration rejected the bare form with a
+/// clap usage error (exit 2).
+#[test]
+fn mcp_stdio_bare_flag_parses() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    contextslice()
+        .current_dir(dir.path())
+        .args(["mcp", "--stdio"])
+        .assert()
+        .code(4) // reaches dispatch: cs-mcp is a skeleton, not a usage error
+        .stderr(predicate::str::contains("not implemented"));
 }

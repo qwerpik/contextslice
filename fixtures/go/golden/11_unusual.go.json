@@ -126,6 +126,7 @@
     {
       "name": "x",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 5,
         "end_line": 5,
@@ -137,6 +138,7 @@
     {
       "name": "y",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 5,
         "end_line": 5,
@@ -148,6 +150,7 @@
     {
       "name": "OneLiner",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 11,
         "end_line": 11,
@@ -159,6 +162,7 @@
     {
       "name": "i",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 26,
         "end_line": 26,
@@ -170,6 +174,7 @@
     {
       "name": "i",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 26,
         "end_line": 26,
@@ -181,6 +186,7 @@
     {
       "name": "i",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 27,
         "end_line": 27,
@@ -192,6 +198,7 @@
     {
       "name": "s",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 32,
         "end_line": 32,
@@ -203,6 +210,7 @@
     {
       "name": "v",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 34,
         "end_line": 34,
@@ -214,6 +222,7 @@
     {
       "name": "esc",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 37,
         "end_line": 37,
@@ -225,6 +234,7 @@
     {
       "name": "ch",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 38,
         "end_line": 38,

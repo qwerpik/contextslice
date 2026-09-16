@@ -51,6 +51,7 @@
     {
       "name": "name",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 9,
         "end_line": 9,
@@ -62,6 +63,7 @@
     {
       "name": "ErrMissing",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 10,
         "end_line": 10,
@@ -73,6 +75,7 @@
     {
       "name": "token",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 12,
         "end_line": 12,
@@ -84,6 +87,7 @@
     {
       "name": "name",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 12,
         "end_line": 12,
@@ -95,6 +99,7 @@
     {
       "name": "name",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 16,
         "end_line": 16,
@@ -104,19 +109,9 @@
       "container": "token"
     },
     {
-      "name": "errors",
-      "kind": "name_ref",
-      "span": {
-        "start_line": 19,
-        "end_line": 19,
-        "start_byte": 315,
-        "end_byte": 321
-      },
-      "container": "ErrMissing"
-    },
-    {
       "name": "New",
       "kind": "call_ref",
+      "qualifier": "errors",
       "span": {
         "start_line": 19,
         "end_line": 19,

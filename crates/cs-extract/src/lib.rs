@@ -25,14 +25,20 @@
 
 #![forbid(unsafe_code)]
 
+use std::ops::ControlFlow;
+use std::time::{Duration, Instant};
+
 use cs_scanner::Language;
 use serde::{Deserialize, Serialize};
 
 /// Per-file parse timeout in milliseconds (ARCHITECTURE §4.2, SECURITY.md §6).
 ///
-/// tree-sitter's Rust binding parses synchronously and exposes no timeout
-/// parameter, so this constant documents the budget the index stage enforces
-/// *around* the parse call rather than a knob this crate can honour internally.
+/// Enforced *inside* the parse via tree-sitter's progress callback
+/// (`Parser::parse_with_options` with `ParseOptions`): when the budget is
+/// exceeded the parse is aborted cooperatively and the file is labeled
+/// [`ParseStatus::Timeout`] with no extracted facts. The budget is wall-clock
+/// per file; at tree-sitter's parse speed a legitimate file at the
+/// [`PARSE_SIZE_CAP`] finishes orders of magnitude under it.
 pub const PARSE_TIMEOUT_MS: u64 = 250;
 
 /// Files at or below this size are parsed at all (ARCHITECTURE §4.1).
@@ -109,6 +115,10 @@ pub enum ParseStatus {
     /// Parsed, but the tree contains error or missing nodes; extraction kept
     /// whatever resolved.
     Partial,
+    /// The parse exceeded the per-file time budget
+    /// ([`PARSE_TIMEOUT_MS`]) and was aborted before a tree existed; the
+    /// file is listed with no extracted facts (SECURITY.md §6).
+    Timeout,
     /// Not parsed: no adapter for the language, or the file exceeded
     /// [`PARSE_SIZE_CAP`].
     Skipped,
@@ -189,6 +199,18 @@ pub struct Ref {
     pub name: String,
     /// What kind of reference this is; selects the resolver's binding rule.
     pub kind: RefKind,
+    /// The selector's operand identifier, when this reference is the selected
+    /// part of `operand.name` and the operand is a plain identifier
+    /// (`auth` of `auth.Session`, `rp` of `rp.Add`). `None` means either that
+    /// the reference has no selector (`helper()`, a bare type name) or that
+    /// its operand is a computed expression (`w.Header().Add`,
+    /// `arr[0].Close`) — the resolver distinguishes these by kind and scope.
+    ///
+    /// Recorded here because extraction owns the syntax tree; the resolver
+    /// sees flat refs and must not re-derive selector relationships from byte
+    /// adjacency (ADR-017 addendum). The operand occurrence itself is *not*
+    /// emitted as a separate reference: it is scope structure, not a name use.
+    pub qualifier: Option<String>,
     /// Source span.
     pub span: Span,
     /// Enclosing symbol's qualified name, when the reference sits inside one.
@@ -319,12 +341,10 @@ pub fn grammar_for(language: Language) -> Option<tree_sitter::Language> {
     }
 }
 
-/// Parse `source` as `language` and report how complete the result is.
+/// Parse `source` as `language` with the default per-file budget
+/// ([`PARSE_TIMEOUT_MS`]) and report how complete the result is.
 ///
-/// This is the first half of extraction: it produces the syntax tree and an
-/// honest [`ParseStatus`]. Query-driven definition/reference/import extraction
-/// (`@def.name`, `@ref.name`, `@import.module` — ARCHITECTURE §4.2) layers on top
-/// of this in MASTER_PLAN §15 step 3.
+/// See [`parse_source_with_timeout`] for the budgeted form.
 ///
 /// # Errors
 ///
@@ -335,6 +355,41 @@ pub fn parse_source(
     source: &str,
     language: Language,
 ) -> Result<(tree_sitter::Tree, ParseStatus), ExtractError> {
+    match parse_source_with_timeout(source, language, Duration::from_millis(PARSE_TIMEOUT_MS))? {
+        Parsed::Tree(tree, status) => Ok((tree, status)),
+        Parsed::TimedOut => Err(ExtractError::NoTree),
+    }
+}
+
+/// The outcome of a budgeted parse.
+#[derive(Debug)]
+pub enum Parsed {
+    /// A syntax tree plus its honest [`ParseStatus`].
+    Tree(tree_sitter::Tree, ParseStatus),
+    /// The parse exceeded its time budget and was aborted cooperatively; no
+    /// tree exists and the caller must label the file, not retry.
+    TimedOut,
+}
+
+/// Parse `source` as `language`, aborting cooperatively once `timeout` of
+/// wall-clock time has elapsed (ARCHITECTURE §4.2, SECURITY.md §6).
+///
+/// The budget is enforced inside tree-sitter via the parse progress callback:
+/// an adversarial-but-parse-capped input can never hang the indexer. An
+/// aborted parse yields [`Parsed::TimedOut`] — a labeled degradation, never a
+/// panic or a wait.
+///
+/// # Errors
+///
+/// Returns [`ExtractError::IncompatibleGrammar`] if the language has no adapter
+/// or its pinned grammar cannot be installed, and [`ExtractError::NoTree`] if
+/// tree-sitter yields no tree (distinct from [`Parsed::TimedOut`], which is a
+/// budget outcome, not a failure).
+pub fn parse_source_with_timeout(
+    source: &str,
+    language: Language,
+    timeout: Duration,
+) -> Result<Parsed, ExtractError> {
     let Some(grammar) = grammar_for(language) else {
         return Err(ExtractError::IncompatibleGrammar {
             lang: language.as_str(),
@@ -346,30 +401,57 @@ pub fn parse_source(
         .map_err(|_| ExtractError::IncompatibleGrammar {
             lang: language.as_str(),
         })?;
-    let tree = parser.parse(source, None).ok_or(ExtractError::NoTree)?;
+
+    let bytes = source.as_bytes();
+    let len = bytes.len();
+    let started = Instant::now();
+    // A budget already spent aborts before parsing: tree-sitter consults the
+    // progress callback only periodically, so a small input can finish without
+    // ever invoking it — the pre-check makes degenerate budgets deterministic.
+    if started.elapsed() >= timeout {
+        return Ok(Parsed::TimedOut);
+    }
+    let mut timed_out = false;
+    let mut progress = |_state: &tree_sitter::ParseState| {
+        if started.elapsed() >= timeout {
+            timed_out = true;
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    };
+    let options = tree_sitter::ParseOptions::new().progress_callback(&mut progress);
+    let tree = parser.parse_with_options(
+        &mut |i: usize, _| {
+            if i < len {
+                &bytes[i..]
+            } else {
+                &[][..]
+            }
+        },
+        None,
+        Some(options),
+    );
+
+    if timed_out {
+        return Ok(Parsed::TimedOut);
+    }
+    let tree = tree.ok_or(ExtractError::NoTree)?;
     let status = if tree.root_node().has_error() {
         ParseStatus::Partial
     } else {
         ParseStatus::Ok
     };
-    Ok((tree, status))
+    Ok(Parsed::Tree(tree, status))
 }
 
 /// The Go extraction adapter (MASTER_PLAN.md §15 step 3).
 mod go;
 
-/// Extract definitions, references and imports from `source`.
+/// Extract definitions, references and imports from `source`, under the
+/// default per-file parse budget ([`PARSE_TIMEOUT_MS`]).
 ///
-/// This is `cs-extract`'s main entry point: parse plus query-driven
-/// extraction (ARCHITECTURE.md §4.2). The result is a pure function of
-/// `(source, language)` — no paths, no clocks, no randomness — which is what
-/// makes the determinism contract (ALGORITHM.md §12) testable.
-///
-/// Malformed source is not an error: it yields
-/// [`ParseStatus::Partial`] with whatever survived error recovery, under the
-/// documented degradation policy (LANGUAGES.md §6.1): a definition survives
-/// only if its declaration subtree contains no error node, and references
-/// with an error node among their ancestors are dropped.
+/// See [`extract_with_timeout`] for the budgeted form.
 ///
 /// # Errors
 ///
@@ -378,8 +460,39 @@ mod go;
 ///   not been built yet (TS/JS, Python during the Go-first milestone).
 /// - [`ExtractError::NoTree`] if tree-sitter yields no tree at all.
 pub fn extract(source: &str, language: Language) -> Result<ExtractedFile, ExtractError> {
+    extract_with_timeout(source, language, Duration::from_millis(PARSE_TIMEOUT_MS))
+}
+
+/// Extract definitions, references and imports from `source`, aborting the
+/// parse once `timeout` of wall-clock time has elapsed.
+///
+/// This is `cs-extract`'s main entry point: parse plus query-driven
+/// extraction (ARCHITECTURE.md §4.2). The result is a pure function of
+/// `(source, language, timeout)` — no paths, no clocks beyond the budget,
+/// no randomness — which is what makes the determinism contract (ALGORITHM.md
+/// §12) testable.
+///
+/// Malformed source is not an error: it yields
+/// [`ParseStatus::Partial`] with whatever survived error recovery, under the
+/// documented degradation policy (LANGUAGES.md §6.1): a definition survives
+/// only if its declaration subtree contains no error node, and references
+/// with an error node among their ancestors are dropped. A source that
+/// outruns the budget yields [`ParseStatus::Timeout`] with no facts — also
+/// not an error (SECURITY.md §6).
+///
+/// # Errors
+///
+/// - [`ExtractError::IncompatibleGrammar`] for languages without an adapter.
+/// - [`ExtractError::NotImplemented`] for Tier 1 languages whose adapter has
+///   not been built yet (TS/JS, Python during the Go-first milestone).
+/// - [`ExtractError::NoTree`] if tree-sitter yields no tree at all.
+pub fn extract_with_timeout(
+    source: &str,
+    language: Language,
+    timeout: Duration,
+) -> Result<ExtractedFile, ExtractError> {
     match language {
-        Language::Go => go::extract(source),
+        Language::Go => go::extract_with_timeout(source, timeout),
         Language::TypeScript | Language::Tsx | Language::JavaScript | Language::Python => {
             Err(ExtractError::NotImplemented {
                 lang: language.as_str(),
@@ -466,6 +579,31 @@ mod tests {
         let (_, status) =
             parse_source("func ( { ] broken", Language::Go).expect("must still produce a tree");
         assert_eq!(status, ParseStatus::Partial);
+    }
+
+    #[test]
+    fn zero_budget_parse_times_out_as_a_labeled_degradation() {
+        // A zero budget aborts the parse at the first progress callback: the
+        // outcome must be an honest Timeout with no facts, never a hang.
+        let file = extract_with_timeout(
+            "package p\n\nfunc F() { return 1 }\n",
+            Language::Go,
+            Duration::ZERO,
+        )
+        .expect("timeout is not an error");
+        assert_eq!(file.status, ParseStatus::Timeout);
+        assert!(file.defs.is_empty() && file.refs.is_empty() && file.imports.is_empty());
+        assert!(file.package_name.is_none());
+
+        // At the parse level: TimedOut, distinct from a no-tree failure.
+        let parsed = parse_source_with_timeout("package p\n", Language::Go, Duration::ZERO)
+            .expect("budget outcome");
+        assert!(matches!(parsed, Parsed::TimedOut));
+
+        // A real budget still parses cleanly (the guard never fires on
+        // honest input).
+        let (_, status) = parse_source("package p\n", Language::Go).expect("parse");
+        assert_eq!(status, ParseStatus::Ok);
     }
 
     #[test]

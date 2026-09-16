@@ -29,7 +29,7 @@
       "container": null,
       "exported": true,
       "signature": "const ModeFast = iota",
-      "doc": null
+      "doc": "ModeFast skips validation."
     },
     {
       "name": "ModeSlow",
@@ -124,19 +124,9 @@
   ],
   "refs": [
     {
-      "name": "time",
-      "kind": "name_ref",
-      "span": {
-        "start_line": 19,
-        "end_line": 19,
-        "start_byte": 290,
-        "end_byte": 294
-      },
-      "container": "DefaultTimeout"
-    },
-    {
       "name": "Second",
       "kind": "field_ref",
+      "qualifier": "time",
       "span": {
         "start_line": 19,
         "end_line": 19,

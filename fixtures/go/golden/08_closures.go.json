@@ -79,19 +79,9 @@
   ],
   "refs": [
     {
-      "name": "http",
-      "kind": "name_ref",
-      "span": {
-        "start_line": 6,
-        "end_line": 6,
-        "start_byte": 85,
-        "end_byte": 89
-      },
-      "container": "Handler"
-    },
-    {
       "name": "ResponseWriter",
       "kind": "type_ref",
+      "qualifier": "http",
       "span": {
         "start_line": 6,
         "end_line": 6,
@@ -101,19 +91,9 @@
       "container": "Handler"
     },
     {
-      "name": "http",
-      "kind": "name_ref",
-      "span": {
-        "start_line": 6,
-        "end_line": 6,
-        "start_byte": 109,
-        "end_byte": 113
-      },
-      "container": "Handler"
-    },
-    {
       "name": "Request",
       "kind": "type_ref",
+      "qualifier": "http",
       "span": {
         "start_line": 6,
         "end_line": 6,
@@ -123,19 +103,9 @@
       "container": "Handler"
     },
     {
-      "name": "r",
-      "kind": "name_ref",
-      "span": {
-        "start_line": 7,
-        "end_line": 7,
-        "start_byte": 132,
-        "end_byte": 133
-      },
-      "container": "Handler"
-    },
-    {
       "name": "Body",
       "kind": "field_ref",
+      "qualifier": "r",
       "span": {
         "start_line": 7,
         "end_line": 7,
@@ -147,6 +117,7 @@
     {
       "name": "Close",
       "kind": "call_ref",
+      "qualifier": null,
       "span": {
         "start_line": 7,
         "end_line": 7,
@@ -158,6 +129,7 @@
     {
       "name": "handle",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 8,
         "end_line": 8,
@@ -169,6 +141,7 @@
     {
       "name": "w",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 8,
         "end_line": 8,
@@ -180,6 +153,7 @@
     {
       "name": "r",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 8,
         "end_line": 8,
@@ -191,6 +165,7 @@
     {
       "name": "n",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 12,
         "end_line": 12,
@@ -202,6 +177,7 @@
     {
       "name": "inc",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 13,
         "end_line": 13,
@@ -213,6 +189,7 @@
     {
       "name": "n",
       "kind": "name_ref",
+      "qualifier": null,
       "span": {
         "start_line": 16,
         "end_line": 16,
@@ -222,19 +199,9 @@
       "container": "inc"
     },
     {
-      "name": "http",
-      "kind": "name_ref",
-      "span": {
-        "start_line": 18,
-        "end_line": 18,
-        "start_byte": 294,
-        "end_byte": 298
-      },
-      "container": "handle"
-    },
-    {
       "name": "ResponseWriter",
       "kind": "type_ref",
+      "qualifier": "http",
       "span": {
         "start_line": 18,
         "end_line": 18,
@@ -244,19 +211,9 @@
       "container": "handle"
     },
     {
-      "name": "http",
-      "kind": "name_ref",
-      "span": {
-        "start_line": 18,
-        "end_line": 18,
-        "start_byte": 318,
-        "end_byte": 322
-      },
-      "container": "handle"
-    },
-    {
       "name": "Request",
       "kind": "type_ref",
+      "qualifier": "http",
       "span": {
         "start_line": 18,
         "end_line": 18,
