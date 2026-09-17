@@ -17,7 +17,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode as StdExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -97,6 +97,13 @@ pub enum CliError {
         #[source]
         source: std::io::Error,
     },
+
+    /// An index operation failed.
+    #[error("index error: {detail}")]
+    IndexFailure {
+        /// Explanation and remediation details.
+        detail: String,
+    },
 }
 
 impl CliError {
@@ -105,9 +112,10 @@ impl CliError {
     pub const fn exit_code(&self) -> ExitCode {
         match self {
             Self::NotImplemented { .. } => ExitCode::Internal,
-            // Both are environment/index problems with a user-actionable fix,
-            // which is exactly what exit code 3 means (MASTER_PLAN §6.1).
-            Self::NoIndex { .. } | Self::Output { .. } => ExitCode::Index,
+            // Environment/index problems with a user-actionable fix map to exit code 3 (MASTER_PLAN §6.1).
+            Self::NoIndex { .. } | Self::Output { .. } | Self::IndexFailure { .. } => {
+                ExitCode::Index
+            }
         }
     }
 }
@@ -204,6 +212,8 @@ pub enum Command {
 
     /// Build or refresh the index.
     Index {
+        /// Optional directory to index (defaults to current working directory).
+        dir: Option<PathBuf>,
         /// Discard and rebuild from scratch.
         #[arg(long)]
         rebuild: bool,
@@ -280,6 +290,11 @@ pub fn run(cli: &Cli) -> CliResult {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             run_slice(args, &cwd)
         }
+        Command::Index {
+            dir,
+            rebuild,
+            prune,
+        } => run_index(dir.as_deref(), *rebuild, *prune, &cli.common),
         Command::Version => {
             // stdout: this is the artifact of the command.
             println!("contextslice {}", env!("CARGO_PKG_VERSION"));
@@ -298,12 +313,11 @@ pub fn run(cli: &Cli) -> CliResult {
 /// cannot drift apart from the others.
 fn not_implemented_error(command: &Command) -> CliError {
     let (command, stage, phase) = match command {
-        Command::Index { .. } => ("index", "cs-index", "MASTER_PLAN §15 step 5"),
         Command::Map { .. } => ("map", "cs-select map mode", "MASTER_PLAN §15 step 6"),
         Command::Inspect { .. } => ("inspect", "cs-index queries", "MASTER_PLAN §15 step 5"),
         Command::Mcp { .. } => ("mcp", "cs-mcp server", "MASTER_PLAN §15 step 14"),
         // `run` dispatches the implemented commands before reaching here.
-        Command::Slice(_) | Command::Version | Command::Doctor => (
+        Command::Slice(_) | Command::Index { .. } | Command::Version | Command::Doctor => (
             "unknown",
             "this command",
             "the current milestone (this is a bug in cs-cli)",
@@ -333,6 +347,130 @@ fn run_doctor() {
             "no (run `contextslice index`)"
         }
     );
+    if exists {
+        let db_file = index_path.join("index.db");
+        if db_file.exists() {
+            match cs_index::Doctor::check_file(&db_file) {
+                Ok(diags) => {
+                    for diag in diags {
+                        eprintln!("{diag}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("doctor inspection failed: {e}");
+                }
+            }
+        }
+    }
+}
+
+/// Run index command: cold build, rebuild, or incremental update.
+fn run_index(dir: Option<&Path>, rebuild: bool, _prune: bool, common: &CommonArgs) -> CliResult {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let root = dir.unwrap_or(&cwd);
+    let root = root.canonicalize().map_err(|e| CliError::IndexFailure {
+        detail: format!("cannot access directory {}: {e}", root.display()),
+    })?;
+
+    let index_dir = match &common.index {
+        Some(p) => p.clone(),
+        None => root.join(INDEX_DIR),
+    };
+    let db_path = if index_dir.extension().and_then(|e| e.to_str()) == Some("db") {
+        index_dir
+    } else {
+        index_dir.join("index.db")
+    };
+
+    if rebuild && db_path.exists() {
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    let scan_start = std::time::Instant::now();
+    let scanned = cs_scanner::scan(&root, &cs_scanner::ScanConfig::default()).map_err(|e| {
+        CliError::IndexFailure {
+            detail: format!("scan failed: {e}"),
+        }
+    })?;
+    let scan_dur = scan_start.elapsed();
+    eprintln!("scanned {} files in {:?}", scanned.len(), scan_dur);
+
+    let mut db =
+        cs_index::IndexDatabase::open_or_create(&db_path).map_err(|e| CliError::IndexFailure {
+            detail: format!("failed to open index at {}: {e}", db_path.display()),
+        })?;
+
+    let is_ready = matches!(db.state(), Ok(cs_index::IndexState::Ready));
+    if is_ready && !rebuild {
+        let inc_start = std::time::Instant::now();
+        let stats = db
+            .update_incremental(&root, &scanned)
+            .map_err(|e| CliError::IndexFailure {
+                detail: format!("incremental indexing failed: {e}"),
+            })?;
+        let inc_dur = inc_start.elapsed();
+        eprintln!(
+            "incremental index completed in {:?}: {} unchanged, {} added, {} modified, {} deleted; {} packages re-resolved",
+            inc_dur,
+            stats.files_unchanged,
+            stats.files_added,
+            stats.files_modified,
+            stats.files_deleted,
+            stats.packages_resolved
+        );
+    } else {
+        if matches!(db.state(), Ok(cs_index::IndexState::Building)) {
+            db.doctor_repair(cs_index::RepairPolicy::ResetToEmpty)
+                .map_err(|e| CliError::IndexFailure {
+                    detail: format!("resetting interrupted build failed: {e}"),
+                })?;
+        }
+
+        let build_start = std::time::Instant::now();
+        db.begin_build(cs_index::DEFAULT_CONFIG_FINGERPRINT)
+            .map_err(|e| CliError::IndexFailure {
+                detail: format!("begin build failed: {e}"),
+            })?;
+
+        let ingest_stats =
+            db.ingest_facts(&root, &scanned)
+                .map_err(|e| CliError::IndexFailure {
+                    detail: format!("fact ingestion failed: {e}"),
+                })?;
+
+        let resolve_stats = db.resolve_facts().map_err(|e| CliError::IndexFailure {
+            detail: format!("fact resolution failed: {e}"),
+        })?;
+        let build_dur = build_start.elapsed();
+
+        let snapshot_id = db.compute_snapshot_id().unwrap_or_default();
+        let snap_display = if snapshot_id.len() >= 12 {
+            &snapshot_id[..12]
+        } else {
+            &snapshot_id
+        };
+
+        eprintln!(
+            "cold index completed in {:?}: {} files scanned, {} inserted, {} symbols, {} refs, {} imports",
+            build_dur,
+            ingest_stats.files_scanned,
+            ingest_stats.files_inserted,
+            ingest_stats.symbols_inserted,
+            ingest_stats.refs_inserted,
+            ingest_stats.imports_inserted
+        );
+        eprintln!(
+            "resolved {} imports, {} bound refs, {} unbound refs (snapshot {})",
+            resolve_stats.resolved,
+            resolve_stats.refs_bound,
+            resolve_stats.refs_unbound,
+            snap_display
+        );
+    }
+
+    Ok(())
 }
 
 /// Build a slice.

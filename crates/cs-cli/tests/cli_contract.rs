@@ -60,11 +60,46 @@ fn unimplemented_command_exits_four_and_names_the_roadmap_step() {
     let dir = tempfile::tempdir().expect("tempdir");
     contextslice()
         .current_dir(dir.path())
-        .arg("index")
+        .arg("map")
         .assert()
         .code(4)
         .stderr(predicate::str::contains("not implemented in this build"))
         .stderr(predicate::str::contains("MASTER_PLAN"));
+}
+
+#[test]
+fn index_command_creates_index_and_is_reentrant() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("main.go");
+    std::fs::write(&file, "package main\n\nfunc main() {}\n").unwrap();
+
+    // First run: cold index
+    contextslice()
+        .current_dir(dir.path())
+        .arg("index")
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("cold index completed"));
+
+    // Second run: incremental no-op
+    contextslice()
+        .current_dir(dir.path())
+        .arg("index")
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("incremental index completed"));
+
+    // Doctor reports ready and intact
+    contextslice()
+        .current_dir(dir.path())
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("index present: yes"))
+        .stderr(predicate::str::contains("INDEX_STATE"));
 }
 
 #[test]

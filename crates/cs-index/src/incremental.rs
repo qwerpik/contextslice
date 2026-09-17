@@ -600,7 +600,7 @@ pub fn update_incremental(
     }
 
     // 5. Rebuild ExportedIndex (Pass 2)
-    let exported_index = build_exported_index(&db.conn, &db_path)?;
+    let mut exported_index = build_exported_index(&db.conn, &db_path)?;
 
     if manifest_changed {
         // Module configuration changed: re-resolve all packages in the repo
@@ -620,19 +620,20 @@ pub fn update_incremental(
         exported_index.has_vendor,
     );
 
-    for ((dir, name), pkg) in &exported_index.packages {
+    for ((dir, name), pkg) in &mut exported_index.packages {
         let files: Vec<FilePath> = pkg.files.iter().map(|(_, path)| path.clone()).collect();
         let mut exported: BTreeMap<String, Vec<DefLoc>> = BTreeMap::new();
-        for (sym_name, syms) in &pkg.exported {
+        let raw_exported = std::mem::take(&mut pkg.exported);
+        for (sym_name, syms) in raw_exported {
             let locs = syms
-                .iter()
+                .into_iter()
                 .map(|s| DefLoc {
-                    file: s.file_path.clone(),
-                    qual_name: s.qual_name.clone(),
+                    file: s.file_path,
+                    qual_name: s.qual_name,
                     kind: s.kind,
                 })
                 .collect();
-            exported.insert(sym_name.clone(), locs);
+            exported.insert(sym_name, locs);
         }
         resolver.add_package(
             (dir.clone(), name.clone()),
