@@ -516,10 +516,12 @@ holds. Steps 1–9 are Phase 0+1, steps 10–15 are Phase 2.
    `external`; ref→def matching scoped by package + container.
    *Done when:* edge table verified correct on a fixture repo with internal packages,
    vendor dir, and external deps.
-5. **`cs-index`.** SQLite schema (ARCHITECTURE §5), incremental updates by content hash,
-   snapshot ids, schema versioning, FTS5.
-   *Done when:* second run parses 0 unchanged files (tested); corruption → `doctor`
-   detects and rebuilds; 10k-file cold index < 60 s.
+5. **`cs-index`.** SQLite schema (ARCHITECTURE §5, ADR-021 streaming-first 3-pass pipeline),
+   incremental updates by content hash and surgical reverse-invalidation, snapshot ids,
+   schema versioning, `doctor` corruption diagnosis and repair (FTS5 deferred to step 6).
+   *Done when:* second run parses 0 unchanged files (tested, **6.6 ms** no-op); corruption → `doctor`
+   detects and rebuilds (tested); 10k-file cold index < 60 s (measured **13.1 s**); 50k files
+   RSS < 512 MiB (measured **417.72 MiB**, down 8× from 3.30 GiB). Completed in Milestone M0–M8.
 6. **`cs-select` v1.** Seeding, bounded propagation, level assignment, budget fitting,
    fallbacks (ALGORITHM.md).
    *Done when:* determinism and budget property tests pass; golden slices for 5 fixture
@@ -701,9 +703,11 @@ McNemar power table recomputed exactly (script inline in the doc).
   mandatory in cs-index**; the resolver's claimed "~100 s @10k" is
   refuted (sub-second).
 
-**Next bottleneck:** §15 step 5 — `cs-index`, **streaming-first**: the
-measured 3.30 GiB @ 50k rules out build-then-persist; the index must
-extract/resolve in batches, write incrementally, and drop in-memory state.
-The ARCHITECTURE §5 schema (incl. `refs.qualifier`, `refs.kind=call_ref`,
-`parse_status=timeout`, `imports.resolved_dir`/`resolved_file`) is frozen
-as the load-bearing contract for that work.
+- `cs-index` (Step 5) completed per ADR-021 streaming-first architecture:
+  - 3-pass streaming pipeline: Pass 1 fact batching (≤1000 files/txn), Pass 2 in-memory exported definitions index + blake3 `snapshot_id`, Pass 3 package-by-package resolution and derived rows write-through.
+  - Incremental engine: hash-diffing with zero re-parsing for unchanged files; surgical reverse-invalidation of external callers via `binding_targets`.
+  - Doctor corruption diagnosis and repair engine (`PRAGMA quick_check`, `PRAGMA foreign_key_check`, meta lifecycle verification, dangling row audits).
+  - CLI integration: `contextslice index [--rebuild|--prune] [dir]` and `contextslice doctor`.
+  - All scale gates empirically verified: cold 10k index in **13.1 s** (< 60 s gate); incremental no-op in **6.6 ms** (< 2 s gate); peak RSS at 50k files in **417.72 MiB** (< 512 MiB gate, down 8× from 3.30 GiB).
+
+**Next bottleneck:** §15 step 6 — `cs-select` v1: seeding, bounded propagation, level assignment, budget fitting, fallbacks (ALGORITHM.md).
