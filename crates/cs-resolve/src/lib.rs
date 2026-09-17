@@ -24,9 +24,9 @@ use cs_scanner::Language;
 use serde::{Deserialize, Serialize};
 
 /// The Go resolver (MASTER_PLAN §15 step 4, ADR-018).
-mod go;
+pub mod go;
 
-pub use go::GoResolver;
+pub use go::{parse_module_path, GoResolver};
 
 /// A stable file identifier: the file's repo-relative, `/`-separated path.
 ///

@@ -27,6 +27,7 @@
 #![forbid(unsafe_code)]
 
 pub mod facts;
+pub mod index_pass;
 mod schema;
 
 use std::fmt;
@@ -35,6 +36,10 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, ErrorCode, Transaction};
 
 pub use facts::{ingest_facts, IngestStats, DEFAULT_CONFIG_FINGERPRINT, DEFAULT_FACT_BATCH_SIZE};
+pub use index_pass::{
+    build_exported_index, compute_snapshot_id, ExportedIndex, ExportedSymbol, ModuleInfo,
+    PackageExported,
+};
 pub use schema::{initialize, SCHEMA_SQL, SCHEMA_VERSION};
 
 /// Everything that can go wrong at the storage layer. Every variant is
@@ -408,6 +413,24 @@ impl IndexDatabase {
         batch_size: usize,
     ) -> Result<IngestStats, IndexError> {
         facts::ingest_facts(self, root, files, batch_size)
+    }
+
+    /// Compute the blake3 `snapshot_id` across all files in the index in sorted path order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`IndexError`] if the database query fails.
+    pub fn compute_snapshot_id(&self) -> Result<String, IndexError> {
+        index_pass::compute_snapshot_id(&self.conn, &self.path)
+    }
+
+    /// Run Pass 2: build the in-memory exported definition index and compute the snapshot ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`IndexError`] if the database queries fail.
+    pub fn build_exported_index(&self) -> Result<ExportedIndex, IndexError> {
+        index_pass::build_exported_index(&self.conn, &self.path)
     }
 
     /// Map a busy/locked SQLite failure to [`IndexError::Locked`], leaving

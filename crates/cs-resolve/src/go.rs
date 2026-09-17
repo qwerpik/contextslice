@@ -109,7 +109,8 @@ enum QualifierTarget {
 /// `require`/`replace`/`exclude` are deliberately ignored (ADR-018: replace
 /// directives would need module graph resolution; repos relying on them get
 /// those imports as External).
-fn parse_module_path(content: &str) -> Option<String> {
+#[must_use]
+pub fn parse_module_path(content: &str) -> Option<String> {
     for line in content.lines() {
         // Strip an inline comment first (`module m // staging`): a comment
         // left on the path breaks every own-module prefix match. `//` never
