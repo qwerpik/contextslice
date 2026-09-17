@@ -26,6 +26,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod doctor;
 pub mod facts;
 pub mod incremental;
 pub mod index_pass;
@@ -37,6 +38,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, ErrorCode, Transaction};
 
+pub use doctor::{DiagnosticSeverity, Doctor, DoctorDiagnostic, RepairPolicy};
 pub use facts::{ingest_facts, IngestStats, DEFAULT_CONFIG_FINGERPRINT, DEFAULT_FACT_BATCH_SIZE};
 pub use incremental::{update_incremental, IncrementalStats};
 pub use index_pass::{
@@ -392,6 +394,11 @@ impl IndexDatabase {
         &self.conn
     }
 
+    /// Mutable access to the underlying SQLite connection.
+    pub fn connection_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+
     /// Ingest raw facts from `files` into the database in batched transactions.
     ///
     /// # Errors
@@ -461,6 +468,21 @@ impl IndexDatabase {
         scanned_files: &[cs_scanner::ScannedFile],
     ) -> Result<IncrementalStats, IndexError> {
         incremental::update_incremental(self, root, scanned_files)
+    }
+
+    /// Inspect this database connection and return all diagnostic findings.
+    #[must_use]
+    pub fn doctor_check(&self) -> Vec<DoctorDiagnostic> {
+        Doctor::check(&self.conn)
+    }
+
+    /// Repair this database connection according to the chosen [`RepairPolicy`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IndexError`] if any repair command fails.
+    pub fn doctor_repair(&mut self, policy: RepairPolicy) -> Result<(), IndexError> {
+        Doctor::repair(&mut self.conn, policy).map_err(|e| Self::classify(&self.path, e))
     }
 
     /// Map a busy/locked SQLite failure to [`IndexError::Locked`], leaving
