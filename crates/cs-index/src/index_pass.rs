@@ -157,7 +157,7 @@ pub fn compute_snapshot_id(conn: &Connection, db_path: &Path) -> Result<String, 
 }
 
 /// Parse symbol kind string from SQLite into [`DefKind`].
-fn parse_def_kind(kind: &str) -> DefKind {
+pub(crate) fn parse_def_kind(kind: &str) -> DefKind {
     match kind {
         "method" => DefKind::Method,
         "class" => DefKind::Class,

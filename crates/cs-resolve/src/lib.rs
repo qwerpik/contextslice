@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 /// The Go resolver (MASTER_PLAN §15 step 4, ADR-018).
 pub mod go;
 
-pub use go::{parse_module_path, GoResolver};
+pub use go::{parse_module_path, FileOutcome, GoResolver, ModuleInfo, Package as GoPackage};
 
 /// A stable file identifier: the file's repo-relative, `/`-separated path.
 ///
@@ -91,6 +91,22 @@ pub enum UnresolvedReason {
     Internal,
     /// The target exists conceptually but this adapter does not model it yet.
     Unsupported,
+}
+
+impl UnresolvedReason {
+    /// Stable string used as SQLite `imports.unresolved_reason` and in diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Alias => "alias",
+            Self::Dynamic => "dynamic",
+            Self::Malformed => "malformed",
+            Self::EscapesRoot => "escapes_root",
+            Self::NotFound => "not_found",
+            Self::Internal => "internal",
+            Self::Unsupported => "unsupported",
+        }
+    }
 }
 
 /// Cross-file relationship kinds (ARCHITECTURE §5, `edges.kind`).
@@ -253,6 +269,22 @@ pub enum UnboundReason {
     /// noise even when the name is unique in the package (the gin/chi audit
     /// measured this as the dominant FP class; ADR-018).
     UniverseMethod,
+}
+
+impl UnboundReason {
+    /// Stable string used as SQLite `bindings.unbound_reason` and in diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoCandidate => "no_candidate",
+            Self::ExternalScope => "external_scope",
+            Self::NoScope => "no_scope",
+            Self::MethodAmbiguous => "method_ambiguous",
+            Self::AmbiguousDotImport => "ambiguous_dot_import",
+            Self::NeedsTypeInfo => "needs_type_info",
+            Self::UniverseMethod => "universe_method",
+        }
+    }
 }
 
 /// The outcome for one reference: zero or more target definitions, or a

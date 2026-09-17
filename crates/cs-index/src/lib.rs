@@ -28,6 +28,7 @@
 
 pub mod facts;
 pub mod index_pass;
+pub mod resolve_pass;
 mod schema;
 
 use std::fmt;
@@ -40,6 +41,7 @@ pub use index_pass::{
     build_exported_index, compute_snapshot_id, ExportedIndex, ExportedSymbol, ModuleInfo,
     PackageExported,
 };
+pub use resolve_pass::resolve_facts;
 pub use schema::{initialize, SCHEMA_SQL, SCHEMA_VERSION};
 
 /// Everything that can go wrong at the storage layer. Every variant is
@@ -431,6 +433,18 @@ impl IndexDatabase {
     /// Returns an [`IndexError`] if the database queries fail.
     pub fn build_exported_index(&self) -> Result<ExportedIndex, IndexError> {
         index_pass::build_exported_index(&self.conn, &self.path)
+    }
+
+    /// Run Pass 3: package-by-package resolution and derived row write-through.
+    ///
+    /// Flips the index state from `Building` to `Ready` and commits `snapshot_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IndexError::StateConflict`] if the index is not in `Building` state.
+    /// Propagates storage errors.
+    pub fn resolve_facts(&mut self) -> Result<cs_resolve::ResolutionStats, IndexError> {
+        resolve_pass::resolve_facts(self)
     }
 
     /// Map a busy/locked SQLite failure to [`IndexError::Locked`], leaving

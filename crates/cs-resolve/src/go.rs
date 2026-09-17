@@ -52,9 +52,19 @@ use cs_scanner::Language;
 /// One `go.mod`: the directory it governs (`""` at the repo root) and the
 /// module path it declares.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ModuleInfo {
-    dir: String,
-    path: String,
+pub struct ModuleInfo {
+    /// Directory containing the manifest, repo-relative (`""` for root).
+    pub dir: String,
+    /// Declared module path.
+    pub path: String,
+}
+
+impl ModuleInfo {
+    /// Construct a new [`ModuleInfo`].
+    #[must_use]
+    pub fn new(dir: String, path: String) -> Self {
+        Self { dir, path }
+    }
 }
 
 /// A package: all files sharing one `(dir, name)` identity, with its
@@ -67,16 +77,17 @@ struct ModuleInfo {
 /// defs (Go build semantics). `exported` is therefore built from non-test
 /// files only; `defs`/`methods` keep everything for same-package binding.
 #[derive(Debug, Clone, Default)]
-struct Package {
-    files: Vec<FilePath>,
+pub struct Package {
+    /// Files belonging to this package.
+    pub files: Vec<FilePath>,
     /// All defs by bare name (unexported included — same-package files see
     /// them).
-    defs: BTreeMap<String, Vec<DefLoc>>,
+    pub defs: BTreeMap<String, Vec<DefLoc>>,
     /// Exported defs from NON-TEST files by name (what importers may bind
     /// to; internal test files are invisible to importers).
-    exported: BTreeMap<String, Vec<DefLoc>>,
+    pub exported: BTreeMap<String, Vec<DefLoc>>,
     /// Method defs by bare method name (for unique-only method binding).
-    methods: BTreeMap<String, Vec<DefLoc>>,
+    pub methods: BTreeMap<String, Vec<DefLoc>>,
 }
 
 /// The built index: packages by identity, module list, per-directory
@@ -360,18 +371,71 @@ impl LanguageResolver for GoResolver {
 }
 
 /// What resolving one file contributes to the repo-level output.
-struct FileOutcome {
-    resolution: FileResolution,
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileOutcome {
+    /// File resolution output (imports and refs with bindings).
+    pub resolution: FileResolution,
     /// Non-test files of resolved imports (`import_out` edge targets).
-    import_targets: Vec<FilePath>,
+    pub import_targets: Vec<FilePath>,
     /// Non-test files in the same directory (test affinity, both ways).
-    affinity_targets: Vec<FilePath>,
+    pub affinity_targets: Vec<FilePath>,
     /// One entry per bound ref target in another file (`ref_def` counting
     /// needs multiplicity for the sqrt dampener).
-    ref_targets: Vec<FilePath>,
+    pub ref_targets: Vec<FilePath>,
 }
 
 impl GoResolver {
+    /// Construct an empty [`GoResolver`] with modules and package directory mappings.
+    #[must_use]
+    pub fn new_empty(
+        modules: Vec<ModuleInfo>,
+        package_dirs: BTreeMap<String, Vec<String>>,
+        has_vendor: bool,
+    ) -> Self {
+        Self {
+            modules,
+            packages: BTreeMap::new(),
+            package_dirs,
+            has_vendor,
+        }
+    }
+
+    /// Add an exported package to the resolver.
+    pub fn add_package(&mut self, key: (String, String), package: Package) {
+        self.packages.insert(key, package);
+    }
+
+    /// Set local definitions and methods for a package during package-level resolve.
+    pub fn set_package_defs(
+        &mut self,
+        key: &(String, String),
+        defs: BTreeMap<String, Vec<DefLoc>>,
+        methods: BTreeMap<String, Vec<DefLoc>>,
+    ) {
+        if let Some(pkg) = self.packages.get_mut(key) {
+            pkg.defs = defs;
+            pkg.methods = methods;
+        }
+    }
+
+    /// Clear local definitions and methods for a package after package-level resolve.
+    pub fn clear_package_defs(&mut self, key: &(String, String)) {
+        if let Some(pkg) = self.packages.get_mut(key) {
+            pkg.defs.clear();
+            pkg.methods.clear();
+        }
+    }
+
+    /// Resolve one file and produce its [`FileOutcome`] (used by `cs-index` streaming pass).
+    pub fn resolve_file_outcome(
+        &self,
+        path: &str,
+        extracted: &cs_extract::ExtractedFile,
+        stats: &mut crate::ResolutionStats,
+    ) -> FileOutcome {
+        self.resolve_file(path, extracted, stats)
+    }
+
     /// Resolve imports, build the file's qualifier scope, bind its refs
     /// and collect edge targets for one file. Pure; mutations flow out
     /// through the returned outcome plus the shared stats counter.
