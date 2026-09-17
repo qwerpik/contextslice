@@ -26,6 +26,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod facts;
 mod schema;
 
 use std::fmt;
@@ -33,6 +34,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, ErrorCode, Transaction};
 
+pub use facts::{ingest_facts, IngestStats, DEFAULT_CONFIG_FINGERPRINT, DEFAULT_FACT_BATCH_SIZE};
 pub use schema::{initialize, SCHEMA_SQL, SCHEMA_VERSION};
 
 /// Everything that can go wrong at the storage layer. Every variant is
@@ -381,6 +383,33 @@ impl IndexDatabase {
         &self.conn
     }
 
+    /// Ingest raw facts from `files` into the database in batched transactions.
+    ///
+    /// # Errors
+    ///
+    /// Propagates storage errors or [`IndexError::StateConflict`] if the index is `Ready`.
+    pub fn ingest_facts(
+        &mut self,
+        root: &Path,
+        files: &[cs_scanner::ScannedFile],
+    ) -> Result<IngestStats, IndexError> {
+        facts::ingest_facts(self, root, files, DEFAULT_FACT_BATCH_SIZE)
+    }
+
+    /// Ingest raw facts from `files` into the database with a custom batch size.
+    ///
+    /// # Errors
+    ///
+    /// Propagates storage errors or [`IndexError::StateConflict`] if the index is `Ready`.
+    pub fn ingest_facts_with_batch_size(
+        &mut self,
+        root: &Path,
+        files: &[cs_scanner::ScannedFile],
+        batch_size: usize,
+    ) -> Result<IngestStats, IndexError> {
+        facts::ingest_facts(self, root, files, batch_size)
+    }
+
     /// Map a busy/locked SQLite failure to [`IndexError::Locked`], leaving
     /// everything else intact.
     fn lock(path: &Path, err: rusqlite::Error) -> IndexError {
@@ -396,7 +425,7 @@ impl IndexDatabase {
 
     /// Classify a raw SQLite failure against the index path: not-a-database
     /// files are corrupt-or-foreign, everything else is reported verbatim.
-    fn classify(path: &Path, err: rusqlite::Error) -> IndexError {
+    pub(crate) fn classify(path: &Path, err: rusqlite::Error) -> IndexError {
         if matches!(err.sqlite_error_code(), Some(ErrorCode::NotADatabase)) {
             IndexError::Corrupt {
                 path: path.to_path_buf(),
