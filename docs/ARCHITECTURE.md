@@ -220,20 +220,41 @@ beyond reading the index snapshot — this is what makes determinism testable.
 
 - **Purpose:** persistent, incremental store of everything above.
 - **Inputs:** scanner/extract/resolve outputs.
-- **Outputs:** query APIs: FTS5 symbol search, file/symbol lookup, edge CSR, snapshot ids.
-- **Algorithms/data:** SQLite via rusqlite, WAL mode, batched transactions (10k rows).
-  Incrementality keyed on blake3 content hash: unchanged hash ⇒ skip parse; changed ⇒
-  re-extract that file and re-resolve its edges (resolution is per-file-pair, so a
-  changed file only rewrites edges where it is `src`; `dst`-side invalidation is handled
-  by a nightly `--rebuild` and by `doctor` detection).
+- **Outputs:** query APIs: FTS5 symbol search (step 6), file/symbol lookup, edge CSR, snapshot ids.
+- **Algorithms/data (ADR-021, streaming-first):** three passes over
+  SQLite-as-fact-store. *Pass 1 (facts):* scan → per-file extract → persist
+  raw facts (`files`, `symbols`, `refs`, `imports`, `manifests`) in
+  transactions of ≤1k files, one `ExtractedFile` in memory at a time.
+  *Pass 2 (index):* streaming SELECTs build the only repo-proportional
+  memory — exported definitions as integer tuples, the package table, the
+  module list — plus `snapshot_id` (blake3 over sorted `(path, hash)`).
+  *Pass 3 (resolve):* packages in sorted `(dir, name)` order; per package,
+  load facts, resolve via the `cs-resolve` seam, and write derived rows
+  (`imports.resolved_*`, `bindings`, `binding_targets`, `edges`) through in
+  one transaction. Raw facts are the durable truth; derived rows are a
+  re-derivable projection (ADR-021 D2). WAL mode, `synchronous=NORMAL`,
+  `foreign_keys=ON`; fresh builds run under `meta.index_state='building'`
+  (slices refuse; indexing resumes) and flip to `'ready'` atomically.
+  Incremental runs stay `'ready'`: every committed state is coherent.
+- **Incrementality (ADR-021 D5):** keyed on blake3 content hash — always
+  computed; `mtime` is recorded, never trusted. Unchanged hash ⇒ zero
+  parsing. Changed file ⇒ re-extract it, re-resolve its whole package,
+  then reverse-invalidate: sources whose bindings point into the package
+  and no longer resolve are re-resolved in their own package contexts
+  (indexed lookup over `binding_targets(file_id)`). Deletions cascade and
+  clean both edge directions in the same transaction.
 - **Storage:** `.contextslice/index.db` at repo root (self-contained, easy to inspect
   with the sqlite3 CLI — a feature, not an accident). Schema in §5.
-- **Performance:** 10k files cold < 60 s; incremental < 2 s for typical dirty sets;
-  index size 5–15 MB/10k files.
-- **Failure modes:** corruption (detected via `PRAGMA quick_check` at open in doctor
-  mode; remediation = rebuild), schema version mismatch (migrate forward; refuse
-  backward with instructions), concurrent writers (file lock; second invocation fails
-  fast with a clear message).
+- **Performance:** 10k files cold < 60 s (measured pipeline floor 9.7 s,
+  extraction-dominated); incremental < 2 s for typical dirty sets @10k;
+  RSS < 512 MiB @50k (the in-memory pipeline measured 3.30 GiB — ADR-021
+  exists to retire that number); index size 5–15 MB/10k files.
+- **Failure modes:** crash mid-fresh-build (`building` state; resume is
+  hash-driven and free), crash mid-incremental (coherent prefix — each
+  file's hash matches its facts), corruption (`PRAGMA quick_check` at open
+  in doctor mode; remediation = rebuild), schema/config mismatch (rebuild;
+  no migration machinery until a released format exists), concurrent
+  writers (fail fast with a clear message; no busy timeout).
 - **MVP:** yes.
 
 ### 4.5 cs-git
@@ -314,40 +335,54 @@ attach numbers.
 
 ---
 
-## 5. Data model (SQLite schema, normative sketch)
+## 5. Data model (SQLite schema, frozen — ADR-021)
 
 ```sql
--- schema_version in meta; migrate forward only
+-- meta: key/value; normative keys (ADR-021 D6): 'schema_version', 'index_state'
+-- ('empty'|'building'|'ready'), 'snapshot_id', 'config_fingerprint', 'git_head'
+-- (step 5c). No 'created_at': meta must be a function of the indexed input
+-- (byte-identical semantic dumps).
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
--- key 'schema_version', 'snapshot_id', 'git_head', 'created_at'
+-- PRAGMA user_version mirrors meta.schema_version for sqlite3 CLI inspection.
+
+CREATE TABLE packages (
+  id INTEGER PRIMARY KEY,
+  dir TEXT NOT NULL,                  -- repo-relative, '' at root (ADR-018 identity)
+  name TEXT NOT NULL,                 -- package clause name (never a path tail)
+  lang TEXT NOT NULL DEFAULT 'go',    -- language-tagged now, free for adapters later
+  UNIQUE (dir, name, lang)
+);
 
 CREATE TABLE files (
   id INTEGER PRIMARY KEY,
   path TEXT NOT NULL UNIQUE,          -- repo-relative, '/'-separated, normalized
   lang TEXT NOT NULL,                 -- 'go','ts','tsx','python',... 'unknown'
-  package_name TEXT,                  -- Go package clause; NULL when absent/broken
-  hash BLOB NOT NULL,                 -- blake3 of content
+  package_id INTEGER REFERENCES packages(id) ON DELETE SET NULL,  -- NULL = no clause / pseudo
+  hash BLOB,                          -- blake3; NULL iff skip='too_large' (never read)
+  skip TEXT,                          -- too_large | parse_skipped | unreadable; NULL = hashed clean
   size INTEGER NOT NULL,
-  mtime INTEGER NOT NULL,
+  mtime INTEGER NOT NULL,             -- recorded for diagnostics; NEVER a skip shortcut (ADR-021 D5)
   parse_status TEXT NOT NULL,         -- ok | partial | timeout | skipped | unsupported
-  tokens_est INTEGER                  -- whole-file estimate, for map mode
+  tokens_est INTEGER                  -- whole-file estimate, for map mode (unpopulated in step 5)
 );
+-- consistency (schema-enforced by CHECK; doctor re-verifies): hash IS NULL <=>
+-- skip='too_large'; skip IS NOT NULL => hash IS NOT NULL; hash IS NULL => parse_status='skipped'.
 
 CREATE TABLE symbols (
   id INTEGER PRIMARY KEY,
   file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
-  qual_name TEXT NOT NULL,            -- module-path-qualified
+  qual_name TEXT NOT NULL,            -- file-local qualified name (Session.Validate)
   kind TEXT NOT NULL,                 -- func|method|class|struct|interface|type|const|var|enum...
   exported INTEGER NOT NULL,          -- language's export rule, decided at extraction
   line INTEGER NOT NULL, end_line INTEGER NOT NULL,
   start_byte INTEGER NOT NULL, end_byte INTEGER NOT NULL,  -- body slicing for L4/L5
   signature TEXT,                     -- rendered one-liner for L2/L3
-  container_id INTEGER REFERENCES symbols(id),  -- enclosing symbol
+  container TEXT,                     -- enclosing symbol's qual_name (ADR-021 D6: TEXT, not id)
   doc TEXT                            -- first doc-comment paragraph
 );
-CREATE INDEX idx_symbols_name ON symbols(name);
 CREATE INDEX idx_symbols_file ON symbols(file_id);
+CREATE INDEX idx_symbols_exported ON symbols(name, file_id) WHERE exported = 1;  -- binding hot path
 
 CREATE TABLE refs (
   id INTEGER PRIMARY KEY,
@@ -356,39 +391,71 @@ CREATE TABLE refs (
   kind TEXT NOT NULL,                 -- name_ref | field_ref | call_ref | type_ref
   qualifier TEXT,                     -- selector operand identifier (ADR-020); NULL = none/computed
   line INTEGER NOT NULL,
-  container_id INTEGER REFERENCES symbols(id),
-  resolved_symbol_id INTEGER REFERENCES symbols(id)  -- NULL = unresolved (approx graph)
+  start_byte INTEGER NOT NULL, end_byte INTEGER NOT NULL,  -- span (re-derivation, audit sampling)
+  container TEXT                      -- enclosing symbol's qual_name; NULL at file scope
 );
-CREATE INDEX idx_refs_name ON refs(name);
+CREATE INDEX idx_refs_file ON refs(file_id);
+-- Bindings deliberately do NOT live here (ADR-021 D4): def rowids churn on
+-- re-extraction; binding targets are (file_id, qual_name, kind) below, which
+-- survive churn and index the reverse-invalidation lookup.
 
 CREATE TABLE imports (
+  id INTEGER PRIMARY KEY,             -- resolution needs a stable per-row key
   file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
   raw TEXT NOT NULL,                  -- specifier as written
   alias TEXT,                         -- named alias; '.' dot import; '_' blank import; NULL plain
-  resolved_dir TEXT,                  -- package directory (Go imports bind multi-file packages, ADR-018); NULL = external/unresolved
-  resolved_file TEXT,                 -- file-module languages only (TS/Python import files, F-24): exactly ONE of
-                                      -- resolved_dir/resolved_file is non-NULL per row, set by the language's convention
-  kind TEXT NOT NULL                  -- import|export-from|require|dynamic...
+  kind TEXT NOT NULL,                 -- import|export-from|require|dynamic...
+  ordinal INTEGER NOT NULL,           -- source order (deterministic iteration)
+  resolved_dir TEXT,                  -- directory-packages (Go, ADR-018): package dir
+  resolved_file TEXT,                 -- file-module languages only (TS/Python): exactly ONE of
+                                      -- resolved_dir/resolved_file is non-NULL when status is resolved
+  unresolved_reason TEXT              -- escaperoot|notfound|internal|alias|... (NULL when resolved)
+);
+CREATE INDEX idx_imports_file ON imports(file_id);
+-- resolved_dir/resolved_file/unresolved_reason are DERIVED (resolve pass UPDATEs);
+-- truth = (imports.raw, packages, manifests). Doctor may re-derive and compare.
+
+CREATE TABLE manifests (
+  path TEXT PRIMARY KEY,              -- repo-relative ('go.mod' today; language-generic name)
+  content TEXT NOT NULL               -- verbatim; re-resolution needs modules without the FS
 );
 
-CREATE TABLE edges (
+CREATE TABLE bindings (               -- DERIVED (resolve pass): one per ref
+  ref_id INTEGER PRIMARY KEY REFERENCES refs(id) ON DELETE CASCADE,
+  unbound_reason TEXT                  -- no_candidate|external_scope|no_scope|method_ambiguous|
+                                       -- ambiguous_dot_import|needs_type_info|universe_method; NULL = bound
+);
+
+CREATE TABLE binding_targets (        -- DERIVED: 0..n per binding (bind-all for tag variants)
+  ref_id INTEGER NOT NULL REFERENCES refs(id) ON DELETE CASCADE,
+  file_id INTEGER NOT NULL REFERENCES files(id),   -- deletes of targets go through invalidation (D5), not cascade
+  qual_name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  PRIMARY KEY (ref_id, file_id, qual_name)
+);
+CREATE INDEX idx_btargets_file ON binding_targets(file_id);  -- reverse-invalidation hot path
+
+CREATE TABLE edges (                  -- DERIVED projection of imports+bindings+files (rebuildable)
   src INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
   dst INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
   kind TEXT NOT NULL,                 -- import_out|ref_def|test_affinity
   weight REAL NOT NULL,
   PRIMARY KEY (src, dst, kind)
 );
-
-CREATE VIRTUAL TABLE symbols_fts USING fts5(name, qual_name, content='symbols');
+CREATE INDEX idx_edges_dst ON edges(dst);
+-- FTS5 (symbols_fts) lands with cs-select (step 6, ADR-021 D10): the raw
+-- text and spans above are everything it will need.
 ```
 
 In-memory (built at slice time, never persisted): CSR adjacency over `edges` — 100k
 edges materialize in <50 ms. `import_in` edges are derived (reverse of `import_out`) at
 CSR build time rather than stored, to halve writes.
 
-Determinism note: ids are assigned after a deterministic sort (by path), so the same
-repository content yields the same database rows and the same slice bytes regardless of
-parallel scheduling.
+Determinism note (ADR-021 D7): batches are contiguous slices of the scanner's
+sorted path list and packages resolve in `(dir, name)` order, so rowids assign in
+sorted-path order — a fresh full index of an identical tree yields a byte-identical
+ordered semantic dump (`SELECT * ORDER BY` per table) and the same `snapshot_id`.
+Physical `.db` bytes are not promised (WAL checkpointing, freelist layout).
 
 ---
 

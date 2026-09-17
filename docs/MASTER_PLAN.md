@@ -581,6 +581,7 @@ holds. Steps 1–9 are Phase 0+1, steps 10–15 are Phase 2.
 | 018 | Go resolver: filesystem-only, package identity (dir, name), unique-only methods + universe-method filter, honest unbound reasons | Every approximation measured on gin/chi before freezing (ADR-018) |
 | 019 | Foundation recovery: audit fixes accepted (E1–E8), four findings refuted on evidence, scaling claims corrected by measurement | Nothing is accepted or refuted from the page — each item settled by probe, test, or measurement (ADR-019) |
 | 020 | `Ref.qualifier` structural, operands suppressed, rule table over the qualifier | Selector relationships are syntax: read them where the tree is in hand, never guessed from byte distance (ADR-020) |
+| 021 | cs-index streaming architecture: facts-first three-pass pipeline, SQLite as the fact store, package + reverse invalidation, no staging tables | The 3.30 GiB @50k measurement forced the design; every schema delta is a named decision in ADR-021 |
 
 Full records live in [`docs/adr/`](adr/) — see the [ADR index](adr/README.md). ADR-011
 through ADR-016 were produced by the bootstrap verification pass: they record what was

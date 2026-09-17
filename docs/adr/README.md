@@ -32,6 +32,7 @@ intact.
 | [018](ADR-018-go-resolver.md) | Go resolver: filesystem-only, package identity, honest approximation | Accepted | Go resolver |
 | [019](ADR-019-foundation-recovery.md) | Foundation recovery: audit fixes accepted, refuted, and measured | Accepted | Foundation Recovery |
 | [020](ADR-020-ref-qualifier-addendum.md) | Ref qualifier addendum: structural selectors, operand suppression | Accepted | Foundation Recovery |
+| [021](ADR-021-cs-index-streaming-architecture.md) | cs-index streaming architecture: facts-first three-pass, SQLite as the fact store | Accepted | cs-index (step 5) |
 
 ## How these were verified
 
