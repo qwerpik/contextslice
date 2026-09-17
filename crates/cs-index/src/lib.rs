@@ -27,6 +27,7 @@
 #![forbid(unsafe_code)]
 
 pub mod facts;
+pub mod incremental;
 pub mod index_pass;
 pub mod resolve_pass;
 mod schema;
@@ -37,6 +38,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, ErrorCode, Transaction};
 
 pub use facts::{ingest_facts, IngestStats, DEFAULT_CONFIG_FINGERPRINT, DEFAULT_FACT_BATCH_SIZE};
+pub use incremental::{update_incremental, IncrementalStats};
 pub use index_pass::{
     build_exported_index, compute_snapshot_id, ExportedIndex, ExportedSymbol, ModuleInfo,
     PackageExported,
@@ -445,6 +447,20 @@ impl IndexDatabase {
     /// Propagates storage errors.
     pub fn resolve_facts(&mut self) -> Result<cs_resolve::ResolutionStats, IndexError> {
         resolve_pass::resolve_facts(self)
+    }
+
+    /// Run an incremental update against an existing [`IndexState::Ready`] database.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IndexError::StateConflict`] if the index is not in [`IndexState::Ready`].
+    /// Propagates I/O and SQLite storage failures.
+    pub fn update_incremental(
+        &mut self,
+        root: &Path,
+        scanned_files: &[cs_scanner::ScannedFile],
+    ) -> Result<IncrementalStats, IndexError> {
+        incremental::update_incremental(self, root, scanned_files)
     }
 
     /// Map a busy/locked SQLite failure to [`IndexError::Locked`], leaving

@@ -51,14 +51,14 @@ pub struct IngestStats {
 }
 
 /// Directory part of a `/`-separated repo-relative path (`""` for root).
-fn dir_of(path: &str) -> &str {
+pub(crate) fn dir_of(path: &str) -> &str {
     match path.rfind('/') {
         Some(i) => &path[..i],
         None => "",
     }
 }
 
-fn import_kind_str(kind: ImportKind) -> &'static str {
+pub(crate) fn import_kind_str(kind: ImportKind) -> &'static str {
     match kind {
         ImportKind::Import => "import",
         ImportKind::ExportFrom => "export-from",
@@ -67,7 +67,7 @@ fn import_kind_str(kind: ImportKind) -> &'static str {
     }
 }
 
-fn parse_status_str(status: ParseStatus) -> &'static str {
+pub(crate) fn parse_status_str(status: ParseStatus) -> &'static str {
     match status {
         ParseStatus::Ok => "ok",
         ParseStatus::Partial => "partial",
@@ -77,7 +77,7 @@ fn parse_status_str(status: ParseStatus) -> &'static str {
     }
 }
 
-fn to_i64(val: u64) -> i64 {
+pub(crate) fn to_i64(val: u64) -> i64 {
     i64::try_from(val).unwrap_or(i64::MAX)
 }
 
