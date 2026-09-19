@@ -51,81 +51,48 @@ no LLM calls, no network, no API keys.
 
 ## Why this is not another repo packer
 
-Whole-repository packing is a solved problem: Repomix, gitingest, code2prompt and
-files-to-prompt do it well, and ContextSlice will lose that beauty contest on purpose
-(MASTER_PLAN.md §3.6).
-
-What is not solved is the question that actually costs an agent turns and tokens:
+Packing a whole repo is solved — Repomix, gitingest, code2prompt do it well, and ContextSlice
+loses that beauty contest on purpose (MASTER_PLAN.md §3.6). The unsolved question is the one
+that costs agents turns and tokens:
 
 > For *this task*, which files, at what level of detail, within *N* tokens?
 
-Three design commitments follow. **Two of them describe how the category already works, and
-are stated that way on purpose** — the differentiation is narrower than a feature list, and
-claiming otherwise would not survive contact with a knowledgeable reader. What is
-distinctive is the *mechanism* in the third:
+| Packers | ContextSlice |
+|---|---|
+| Dump everything, hand-set includes | 🎯 Task text seeds selection, repo graph refines it |
+| Budget as CI guardrail (oversized output still produced) | 📏 Demotes detail until the artifact genuinely fits — never exceeded, property-tested |
+| Per-file levels decided once, greedily | 🧮 Levels assigned globally by gain-per-loss, with hard invariants (seeds never below L2, ≥3 files at ≥L2, budget never exceeded) |
 
-1. **Task-conditioned selection.** The task text drives seeding, and the repository graph
-   refines it. This is **not** unique: Aider seeds from chat keywords and Graft's
-   `graft ask` does deterministic task-conditioned ranking. Aider's repo map proved graph
-   ranking works, and ContextSlice does not claim to have invented context selection.
-2. **A budget that is fitted, not enforced.** Repomix's `--token-budget` documents itself
-   as a CI guard: it exits non-zero when the pack overflows, but *the oversized output is
-   still produced*. ContextSlice demotes detail levels until the artifact genuinely fits,
-   and never exceeds the budget — property-tested against adversarial input.
-3. **Level assignment as a global allocation, not a per-item fallback.** Mixed granularity
-   in one artifact (full files, declaration skeletons, a path-only tree) is **also not
-   unique** — Repomix offers per-file levels, Graft ships signatures-only output, and
-   llm-router falls back to signatures when an item does not fit. What differs is the
-   mechanism: those decide each item once, greedily, and never revisit it. ContextSlice
-   assigns levels globally and demotes by gain-per-loss across all files, which is what
-   makes hard invariants expressible (forced seeds never below L2, ≥3 files at ≥L2 when a
-   seed exists, budget never exceeded).
+Two of the three rows describe how the category already works — stated that way on purpose.
+The differentiation is narrower than a feature list: the *mechanism* in row three, verified
+per-competitor in ADR-015 as "we could not find", never "it does not exist".
 
-Plus a **published, reproducible benchmark** — intrinsic (gold-context recall and precision
-per token) and extrinsic (agent task success per token and cost) — sized by power
-calculation, with the harness, corpus manifests and per-task logs published. Several
-counterexamples exist (RepoGraph, Aider, ContextBench), so we make no "first" claim; we
-make a checkability claim. No public claim ships without a run behind it, and the
-benchmark's negative-results section is mandatory.
+Plus a **published, reproducible benchmark** (intrinsic recall/precision per token, extrinsic
+task success per token and cost) with harness, corpus manifests and per-task logs. No "first"
+claim — RepoGraph, Aider and ContextBench are counterexamples. A checkability claim: no public
+claim ships without a run, and the negative-results section is mandatory.
 
-**A published negative result we take seriously.** arXiv 2602.11988 (June 2026) finds
-that repository context files "do not generally improve task success rates, while
-increasing inference cost by over 20% on average", and that *"repository overviews…
-are not helpful"*. That is aimed at the premise of context injection, so it is recorded
-as risk #4 in the master plan with a stop/go consequence rather than argued away. Two
-consequences for how this project talks about itself: we do **not** pitch repository
-overview (map mode is the empty-seed fallback, not the product), and Phase 3's extrinsic
-benchmark is the real go/no-go — if task-conditioned selection shows no success
-improvement at equal tokens, the project pivots to the flows where no agent-improvement
-claim is needed. The study evaluates static overview files, not task-conditioned
-selection of the files a change will touch; that distinction is a hypothesis to test,
-not a rebuttal to cite.
+> [!CAUTION]
+> **arXiv 2602.11988 takes aim at this premise**: repo context files "do not generally improve
+> task success rates, while increasing inference cost by over 20%". Recorded as risk #4 with a
+> stop/go consequence — Phase 3's extrinsic benchmark is the go/no-go. If task-conditioned
+> selection shows no success gain at equal tokens, the project pivots. The study tests static
+> overviews, not task-conditioned selection; that distinction is a hypothesis to test, not a
+> rebuttal to cite.
 
-**What is not unique, stated plainly.** Task-conditioned selection is table stakes:
-Aider seeds from chat keywords, and Graft's `graft ask` does deterministic
-task-conditioned ranking with no LLM. Graft also ships signatures-only output
-(`graft skeleton`), and Repomix offers per-file inclusion levels. Mixed granularity as a
-*capability* is therefore not the differentiator.
+<details>
+<summary>Honesty notes (retracted claims, verification)</summary>
 
-**Budget-driven granularity is also not unique** — we had to retract that claim too.
-jCodeMunch and `llm-router` both emit an item at full source if it fits and fall back to
-a signature if it does not. What none of them do is treat the budget as a **global
-allocation problem**: llm-router is inclusion-first and greedy, deciding each item once at
-the moment it is inserted and never revisiting it, so a large item admitted early is never
-demoted to make room for a more relevant later one. Graft bounds by result *count*
-(`--limit`); Repomix's levels are hand-declared globs; Aider's split is decided by chat
-membership; SnapZip has no levels at all.
+- Task-conditioned selection is table stakes (Aider chat keywords, Graft `graft ask`
+  deterministic ranking, `graft skeleton` signatures output). Not the differentiator.
+- Budget-driven granularity is not unique either (jCodeMunch, `llm-router` fall back to
+  signatures). What none do is treat it as a **global allocation**: llm-router decides each
+  item once at insertion and never revisits it; Graft bounds by count (`--limit`); Repomix
+  levels are hand-declared globs; Aider's split follows chat membership.
+- There is **no patent moat here**. The defensive position is execution quality,
+  adapter depth, and accumulated evaluation data.
 
-Our claim is therefore about the **mechanism**, and it is the weakest-sounding one we
-could defend: every candidate is assigned a level, then demotion proceeds by
-*gain-per-loss across all files*, subject to invariants a greedy fallback loop cannot
-express — forced seeds never drop below L2, at least three files stay at ≥L2 when any seed
-exists, and the rendered artifact never exceeds the budget. ADR-015 records how each
-competitor was verified, and states plainly that this is "we could not find" rather than
-"it does not exist".
-
-There is **no patent moat here**. The defensive position is execution quality,
-adapter depth, and accumulated evaluation data.
+</details>
 
 ---
 
