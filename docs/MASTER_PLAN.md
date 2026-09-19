@@ -711,3 +711,46 @@ McNemar power table recomputed exactly (script inline in the doc).
   - All scale gates empirically verified: cold 10k index in **13.1 s** (< 60 s gate); incremental no-op in **6.6 ms** (< 2 s gate); peak RSS at 50k files in **417.72 MiB** (< 512 MiB gate, down 8× from 3.30 GiB).
 
 **Next bottleneck:** §15 step 6 — `cs-select` v1: seeding, bounded propagation, level assignment, budget fitting, fallbacks (ALGORITHM.md).
+
+### 2026-09-19 — cs-index corrective patch complete (post–step-5 hardening)
+
+**What was done:** a 12-agent adversarial review of the cs-index milestones
+M2–M8 (at `b84944a`) plus an independent arbitration produced nine canonical
+defect reports (CF-01…CF-09) with the verdict *continue after targeted
+fixes*; the ADR-021 architecture itself was upheld. Applying the ADR-019
+rule — nothing accepted from the page — every claim was re-confirmed at
+HEAD with a failing test before its fix landed. All nine findings are
+fixed: schema v2 gives `files` the scanner's exact truth table (the
+`unreadable` state becomes representable, the `(hash NULL, skip NULL)`
+CHECK hole closes via a COALESCE anchor); reverse invalidation is
+package-scoped as ADR-021 D5 specified (binders *and* directory importers,
+blank imports included, via the new `idx_imports_resolved_dir`); emptied
+packages are garbage-collected instead of shadowing real ones; torn
+incremental updates leave a marked `update_in_progress` state that the
+next run repairs by full re-derivation from hash-consistent facts; library
+resume is hash-driven (not path-driven) and `contextslice index` resumes a
+`building` index instead of resetting it (`--rebuild` is the only reset);
+busy/locked SQLite failures funnel to `IndexError::Locked` in milliseconds
+under a shared, verified pragma contract; lifecycle flips are guarded
+conditional UPDATEs and the open gate demands all ten tables plus a
+`ready` snapshot_id (meta strings alone no longer pass); Pass 2 always
+synthesizes a root module so `nearest_module` cannot mis-attribute root
+files in sub-module-only trees; and the derived-row writer is defined once
+(`DeriveEngine::resolve_package`, pre-clearing what it rewrites — which
+also makes `resolve_facts` idempotent). Recorded in
+[ADR-022](adr/ADR-022-cs-index-corrective-patch.md); schema v2 ships with
+no migration path per the pre-release policy (ADR-021 D6).
+
+**Verified:** `cargo test -p cs-index` — 61 unit + 1 integration test
+(the scripted-edit-history parity gauntlet), all green; the incremental
+oracle throughout is full fresh-build parity on every derived table. The
+stage gates reported `make check` and `make msrv` (toolchain 1.90) green
+on the final tree. One residual verified and recorded in ADR-022's
+consequences: `doctor`'s `FILES_CONSISTENCY` predicate still encodes the
+v1 rules and would flag a legitimate `(hash NULL, skip 'unreadable')` row.
+
+**Contract changes:** ADR-022 added and indexed; ARCHITECTURE §4.4, §5
+(frozen DDL synced to schema v2), and §6 updated to the as-built resume,
+torn-update, and invalidation semantics.
+
+**Next bottleneck:** unchanged — §15 step 6, `cs-select` v1.

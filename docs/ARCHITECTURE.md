@@ -235,14 +235,21 @@ beyond reading the index snapshot — this is what makes determinism testable.
   re-derivable projection (ADR-021 D2). WAL mode, `synchronous=NORMAL`,
   `foreign_keys=ON`; fresh builds run under `meta.index_state='building'`
   (slices refuse; indexing resumes) and flip to `'ready'` atomically.
-  Incremental runs stay `'ready'`: every committed state is coherent.
-- **Incrementality (ADR-021 D5):** keyed on blake3 content hash — always
-  computed; `mtime` is recorded, never trusted. Unchanged hash ⇒ zero
-  parsing. Changed file ⇒ re-extract it, re-resolve its whole package,
-  then reverse-invalidate: sources whose bindings point into the package
-  and no longer resolve are re-resolved in their own package contexts
-  (indexed lookup over `binding_targets(file_id)`). Deletions cascade and
-  clean both edge directions in the same transaction.
+  Incremental runs stay `'ready'`; the fact transaction plants a transient
+  `update_in_progress` marker that only the finalizing transaction (new
+  `snapshot_id`) clears, so a crash mid-update leaves a *marked* torn
+  state, never a falsely finished one (ADR-022).
+- **Incrementality (ADR-021 D5 as built, ADR-022):** keyed on blake3
+  content hash — always computed; `mtime` is recorded, never trusted.
+  Unchanged hash ⇒ zero parsing. Changed file ⇒ re-extract it, re-resolve
+  its whole package P, then reverse-invalidate package-scoped: every
+  package holding bindings into any file of P, plus every package
+  importing P's directory (blank imports included; indexed lookups over
+  `binding_targets(file_id)` and `imports.resolved_dir`), re-resolves in
+  its own package context. Deletions cascade, clean both edge directions
+  in the same transaction, and garbage-collect packages left with no
+  files — an empty ghost would shadow the real package in import
+  resolution.
 - **Storage:** `.contextslice/index.db` at repo root (self-contained, easy to inspect
   with the sqlite3 CLI — a feature, not an accident). Schema in §5.
 - **Performance:** 10k files cold < 60 s (measured pipeline floor 9.7 s,
@@ -250,11 +257,15 @@ beyond reading the index snapshot — this is what makes determinism testable.
   RSS < 512 MiB @50k (the in-memory pipeline measured 3.30 GiB — ADR-021
   exists to retire that number); index size 5–15 MB/10k files.
 - **Failure modes:** crash mid-fresh-build (`building` state; resume is
-  hash-driven and free), crash mid-incremental (coherent prefix — each
-  file's hash matches its facts), corruption (`PRAGMA quick_check` at open
-  in doctor mode; remediation = rebuild), schema/config mismatch (rebuild;
-  no migration machinery until a released format exists), concurrent
-  writers (fail fast with a clear message; no busy timeout).
+  hash-driven and free — the CLI resumes a `building` index, and
+  `--rebuild` is the only reset), crash mid-incremental (facts commit
+  atomically; the derived projection may lag until the next run — the
+  `update_in_progress` marker names the torn state, `doctor` reports it,
+  and the next update repairs by re-deriving from the hash-consistent
+  facts), corruption (`PRAGMA quick_check` at open in doctor mode;
+  remediation = rebuild), schema/config mismatch (rebuild; no migration
+  machinery until a released format exists), concurrent writers (fail
+  fast as a `Locked` error in milliseconds; no busy timeout).
 - **MVP:** yes.
 
 ### 4.5 cs-git
@@ -335,14 +346,15 @@ attach numbers.
 
 ---
 
-## 5. Data model (SQLite schema, frozen — ADR-021)
+## 5. Data model (SQLite schema v2, frozen — ADR-021; v2 amendments in ADR-022)
 
 ```sql
 -- meta: key/value; normative keys (ADR-021 D6): 'schema_version', 'index_state'
 -- ('empty'|'building'|'ready'), 'snapshot_id', 'config_fingerprint', 'git_head'
--- (step 5c). No 'created_at': meta must be a function of the indexed input
+-- (step 5c), plus the transient 'update_in_progress' torn-update marker
+-- (ADR-022). No 'created_at': meta must be a function of the indexed input
 -- (byte-identical semantic dumps).
-CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
 -- PRAGMA user_version mirrors meta.schema_version for sqlite3 CLI inspection.
 
 CREATE TABLE packages (
@@ -358,15 +370,20 @@ CREATE TABLE files (
   path TEXT NOT NULL UNIQUE,          -- repo-relative, '/'-separated, normalized
   lang TEXT NOT NULL,                 -- 'go','ts','tsx','python',... 'unknown'
   package_id INTEGER REFERENCES packages(id) ON DELETE SET NULL,  -- NULL = no clause / pseudo
-  hash BLOB,                          -- blake3; NULL iff skip='too_large' (never read)
-  skip TEXT,                          -- too_large | parse_skipped | unreadable; NULL = hashed clean
+  hash BLOB,                          -- blake3; NULL iff the file was never read (ADR-022)
+  skip TEXT,                          -- 'too_large'|'unreadable' (never read, hash NULL) |
+                                      -- 'parse_skipped' (hashed, over parse cap); NULL = hashed clean
   size INTEGER NOT NULL,
   mtime INTEGER NOT NULL,             -- recorded for diagnostics; NEVER a skip shortcut (ADR-021 D5)
   parse_status TEXT NOT NULL,         -- ok | partial | timeout | skipped | unsupported
   tokens_est INTEGER                  -- whole-file estimate, for map mode (unpopulated in step 5)
 );
--- consistency (schema-enforced by CHECK; doctor re-verifies): hash IS NULL <=>
--- skip='too_large'; skip IS NOT NULL => hash IS NOT NULL; hash IS NULL => parse_status='skipped'.
+-- consistency (schema-enforced by CHECK; doctor re-verifies; ADR-022 truth table):
+-- hash IS NULL => COALESCE(skip,'') IN ('too_large','unreadable') AND parse_status='skipped';
+-- hash IS NOT NULL => (skip IS NULL OR skip='parse_skipped');
+-- parse_status IN ('ok','partial','timeout','skipped','unsupported').
+-- The COALESCE anchors the nullable skip so the OR-chain is total: a bare
+-- `skip IN (...)` evaluates NULL, and SQLite CHECK treats NULL as satisfied.
 
 CREATE TABLE symbols (
   id INTEGER PRIMARY KEY,
@@ -412,11 +429,15 @@ CREATE TABLE imports (
   unresolved_reason TEXT              -- escaperoot|notfound|internal|alias|... (NULL when resolved)
 );
 CREATE INDEX idx_imports_file ON imports(file_id);
+CREATE INDEX idx_imports_resolved_dir ON imports(resolved_dir);
+-- ^ package-scoped reverse invalidation looks up imports by resolved package dir,
+--   blank imports included (ADR-022); ships with the schema so the query cannot
+--   degrade into a full scan.
 -- resolved_dir/resolved_file/unresolved_reason are DERIVED (resolve pass UPDATEs);
 -- truth = (imports.raw, packages, manifests). Doctor may re-derive and compare.
 
 CREATE TABLE manifests (
-  path TEXT PRIMARY KEY,              -- repo-relative ('go.mod' today; language-generic name)
+  path TEXT PRIMARY KEY NOT NULL,     -- repo-relative ('go.mod' today; language-generic name)
   content TEXT NOT NULL               -- verbatim; re-resolution needs modules without the FS
 );
 
@@ -464,8 +485,10 @@ Physical `.db` bytes are not promised (WAL checkpointing, freelist layout).
 - **Create:** `contextslice index` (or first slice). Walk → parse → resolve → one
   transaction per 1k files → snapshot id computed (blake3 over sorted `(path, hash)`
   pairs) → stored in `meta`.
-- **Update:** re-walk; for changed hashes, re-extract and rewrite that file's rows and
-  its outgoing edges; recompute snapshot id. Typical cost ∝ dirty set.
+- **Update:** re-walk; for changed hashes, re-extract those files, re-resolve their
+  packages plus the reverse-invalidated binders and importers (package-scoped,
+  ADR-021 D5 as built / ADR-022), garbage-collect emptied packages, and recompute
+  snapshot id. Typical cost ∝ dirty set.
 - **Invalidate:** `--rebuild` drops and rebuilds; `doctor` detects corruption/version
   mismatch and offers it; major grammar-query upgrades bump schema_version and force a
   one-time rebuild (announced in CHANGELOG).

@@ -16,7 +16,7 @@
 use rusqlite::Transaction;
 
 /// The schema version this build writes and requires.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// The frozen DDL, in dependency order (ARCHITECTURE §5).
 ///
@@ -24,7 +24,7 @@ pub const SCHEMA_VERSION: i64 = 1;
 /// is a foreign or corrupt file, and open detection keys on it.
 pub const SCHEMA_SQL: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS meta (
-        key TEXT PRIMARY KEY,
+        key TEXT PRIMARY KEY NOT NULL,
         value TEXT NOT NULL
     )",
     "CREATE TABLE IF NOT EXISTS packages (
@@ -34,11 +34,14 @@ pub const SCHEMA_SQL: &[&str] = &[
         lang TEXT NOT NULL DEFAULT 'go',
         UNIQUE (dir, name, lang)
     )",
-    // Consistency rules (ADR-021 D6): `hash IS NULL` exactly when the file
-    // was never read (`skip = 'too_large'`); a hashed file may still be
-    // parse-skipped; an unhashed file is always `parse_status = 'skipped'`.
-    // Written as explicit OR-branches because SQLite CHECK treats NULL as
-    // satisfied, and `skip` is nullable.
+    // Consistency rules (ADR-021 D6), frozen as the scanner's truth table:
+    // `hash IS NULL` exactly when the file was never read — `skip` is then
+    // 'too_large' (over the read cap) or 'unreadable' (I/O failure) and
+    // nothing was parsed; a hashed file was read, so it is either clean
+    // (`skip IS NULL`) or in the parse-skip band (`skip = 'parse_skipped'`).
+    // Written so the OR-chain is never NULL: SQLite CHECK treats NULL as
+    // satisfied, and `skip` is nullable, so it is anchored with COALESCE —
+    // a bare `skip IN (...)` would let (hash NULL, skip NULL) through.
     "CREATE TABLE IF NOT EXISTS files (
         id INTEGER PRIMARY KEY,
         path TEXT NOT NULL UNIQUE,
@@ -51,11 +54,12 @@ pub const SCHEMA_SQL: &[&str] = &[
         parse_status TEXT NOT NULL,
         tokens_est INTEGER,
         CHECK (
-            (skip = 'too_large' AND hash IS NULL)
-            OR (skip IS NOT NULL AND skip != 'too_large' AND hash IS NOT NULL)
-            OR (skip IS NULL AND hash IS NOT NULL)
+            (hash IS NULL
+                AND COALESCE(skip, '') IN ('too_large', 'unreadable')
+                AND parse_status = 'skipped')
+            OR (hash IS NOT NULL AND (skip IS NULL OR skip = 'parse_skipped'))
         ),
-        CHECK (hash IS NOT NULL OR parse_status = 'skipped')
+        CHECK (parse_status IN ('ok', 'partial', 'timeout', 'skipped', 'unsupported'))
     )",
     "CREATE TABLE IF NOT EXISTS symbols (
         id INTEGER PRIMARY KEY,
@@ -99,8 +103,12 @@ pub const SCHEMA_SQL: &[&str] = &[
         unresolved_reason TEXT
     )",
     "CREATE INDEX IF NOT EXISTS idx_imports_file ON imports(file_id)",
+    // Package-scoped invalidation looks up imports by resolved package dir;
+    // the index ships with the schema so a later-stage query cannot silently
+    // degrade into a full scan.
+    "CREATE INDEX IF NOT EXISTS idx_imports_resolved_dir ON imports(resolved_dir)",
     "CREATE TABLE IF NOT EXISTS manifests (
-        path TEXT PRIMARY KEY,
+        path TEXT PRIMARY KEY NOT NULL,
         content TEXT NOT NULL
     )",
     "CREATE TABLE IF NOT EXISTS bindings (
@@ -201,6 +209,81 @@ mod tests {
     }
 
     #[test]
+    fn files_check_admits_every_scanner_state() {
+        let mut conn = memory_db();
+        let txn = conn.transaction().expect("txn");
+        initialize(&txn).expect("initialize");
+        txn.commit().expect("commit");
+
+        conn.execute("INSERT INTO packages (dir, name) VALUES ('', 'm')", [])
+            .expect("package");
+        let package_id: i64 = conn.last_insert_rowid();
+
+        // Every (hash, skip, parse_status) triple the scanner plus extraction
+        // can legitimately produce must be insertable (cs-scanner `inspect`):
+        // read-and-parsed, parse-skip band, over-read-cap, and unreadable.
+        conn.execute(
+            "INSERT INTO files (path, lang, package_id, hash, skip, size, mtime, parse_status)
+             VALUES ('a.go', 'go', ?1, x'00', NULL, 3, 0, 'ok')",
+            [package_id],
+        )
+        .expect("clean row");
+        conn.execute(
+            "INSERT INTO files (path, lang, package_id, hash, skip, size, mtime, parse_status)
+             VALUES ('mid.go', 'go', ?1, x'01', 'parse_skipped', 50, 0, 'skipped')",
+            [package_id],
+        )
+        .expect("parse-skipped band row");
+        conn.execute(
+            "INSERT INTO files (path, lang, package_id, hash, skip, size, mtime, parse_status)
+             VALUES ('big.go', 'go', ?1, NULL, 'too_large', 99, 0, 'skipped')",
+            [package_id],
+        )
+        .expect("too-large row");
+        // The scanner's Unreadable state: listed, never read, therefore no
+        // hash and nothing parsed. This is the row CF-02 froze out.
+        conn.execute(
+            "INSERT INTO files (path, lang, package_id, hash, skip, size, mtime, parse_status)
+             VALUES ('locked.go', 'go', ?1, NULL, 'unreadable', 5, 0, 'skipped')",
+            [package_id],
+        )
+        .expect("unreadable row");
+    }
+
+    #[test]
+    fn schema_v2_furniture_is_present() {
+        let mut conn = memory_db();
+        let txn = conn.transaction().expect("txn");
+        initialize(&txn).expect("initialize");
+        txn.commit().expect("commit");
+
+        assert_eq!(SCHEMA_VERSION, 2);
+
+        // Package-scoped invalidation queries imports by resolved_dir; the
+        // index is part of the frozen schema, not an afterthought.
+        let idx: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_imports_resolved_dir'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("index lookup");
+        assert_eq!(idx, 1, "idx_imports_resolved_dir must exist");
+
+        // TEXT PRIMARY KEY on a rowid table does not imply NOT NULL; a NULL
+        // key would be unaddressable by the (key = ?) meta reads.
+        let err = conn.execute("INSERT INTO meta (key, value) VALUES (NULL, 'x')", []);
+        assert!(err.is_err(), "meta.key must be NOT NULL");
+
+        let err = conn.execute(
+            "INSERT INTO manifests (path, content) VALUES (NULL, 'module m')",
+            [],
+        );
+        assert!(err.is_err(), "manifests.path must be NOT NULL");
+    }
+
+    #[test]
     fn files_consistency_checks_reject_impossible_rows() {
         let mut conn = memory_db();
         let txn = conn.transaction().expect("txn");
@@ -211,7 +294,7 @@ mod tests {
             .expect("package");
         let package_id: i64 = conn.last_insert_rowid();
 
-        // Hashed-and-clean file: fine.
+        // Seed one legal row so rejections cannot pass vacuously.
         conn.execute(
             "INSERT INTO files (path, lang, package_id, hash, skip, size, mtime, parse_status)
              VALUES ('a.go', 'go', ?1, x'00', NULL, 3, 0, 'ok')",
@@ -219,29 +302,21 @@ mod tests {
         )
         .expect("clean row");
 
-        // Too-large file: hash NULL, skipped: fine.
-        conn.execute(
-            "INSERT INTO files (path, lang, package_id, hash, skip, size, mtime, parse_status)
-             VALUES ('big.go', 'go', ?1, NULL, 'too_large', 99, 0, 'skipped')",
-            [package_id],
-        )
-        .expect("too-large row");
-
-        // Parse-skipped band: hashed but never parsed: fine.
-        conn.execute(
-            "INSERT INTO files (path, lang, package_id, hash, skip, size, mtime, parse_status)
-             VALUES ('mid.go', 'go', ?1, x'01', 'parse_skipped', 50, 0, 'skipped')",
-            [package_id],
-        )
-        .expect("parse-skipped row");
-
-        // VIOLATION: no hash but not marked too-large.
+        // VIOLATION: no hash and no skip reason at all.
         let err = conn.execute(
             "INSERT INTO files (path, lang, package_id, hash, skip, size, mtime, parse_status)
-             VALUES ('bad.go', 'go', ?1, NULL, 'unreadable', 5, 0, 'skipped')",
+             VALUES ('bad.go', 'go', ?1, NULL, NULL, 5, 0, 'skipped')",
             [package_id],
         );
-        assert!(err.is_err(), "NULL hash requires skip='too_large'");
+        assert!(err.is_err(), "NULL hash requires a skip reason");
+
+        // VIOLATION: the parse-skip band is hashed by definition.
+        let err = conn.execute(
+            "INSERT INTO files (path, lang, package_id, hash, skip, size, mtime, parse_status)
+             VALUES ('bad0.go', 'go', ?1, NULL, 'parse_skipped', 5, 0, 'skipped')",
+            [package_id],
+        );
+        assert!(err.is_err(), "skip='parse_skipped' requires a hash");
 
         // VIOLATION: no hash but claimed parsed.
         let err = conn.execute(
@@ -258,6 +333,23 @@ mod tests {
             [package_id],
         );
         assert!(err.is_err(), "skip='too_large' requires hash IS NULL");
+
+        // VIOLATION: a hashed file was read by definition; 'unreadable' on a
+        // hashed row is a label the scanner can never produce.
+        let err = conn.execute(
+            "INSERT INTO files (path, lang, package_id, hash, skip, size, mtime, parse_status)
+             VALUES ('bad4.go', 'go', ?1, x'03', 'unreadable', 5, 0, 'skipped')",
+            [package_id],
+        );
+        assert!(err.is_err(), "skip='unreadable' requires hash IS NULL");
+
+        // VIOLATION: parse_status outside the extraction vocabulary.
+        let err = conn.execute(
+            "INSERT INTO files (path, lang, package_id, hash, skip, size, mtime, parse_status)
+             VALUES ('bad5.go', 'go', ?1, x'04', NULL, 5, 0, 'bogus')",
+            [package_id],
+        );
+        assert!(err.is_err(), "parse_status must be an extraction status");
     }
 
     #[test]

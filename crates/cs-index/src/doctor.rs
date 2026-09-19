@@ -5,6 +5,7 @@
 //! - **Integrity verification**: runs SQLite `PRAGMA quick_check` and `PRAGMA foreign_key_check`.
 //! - **Schema and state validation**: checks `meta` keys (`schema_version`, `index_state`, `snapshot_id`).
 //! - **Referential consistency**: detects dangling references in `binding_targets`, `edges`, `bindings`, `symbols`, `refs`, and `imports`.
+//! - **Projection completeness**: detects references without bindings rows and unclassified imports (a torn derived write), and surfaces a lingering incremental-update marker.
 //! - **Index health metrics**: reports parse status breakdown, import resolution rate, ref binding rate, and counts.
 //! - **Repair and rebuild**: supports clean rebuild or resetting interrupted runs.
 
@@ -121,6 +122,24 @@ pub enum RepairPolicy {
     ResetToEmpty,
 }
 
+/// Up to ten sample paths for a diagnostic's details (deterministic: sorted).
+fn sample_paths(conn: &Connection, sql: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(mut stmt) = conn.prepare(sql) {
+        if let Ok(mut rows) = stmt.query([]) {
+            while let Ok(Some(row)) = rows.next() {
+                if let Ok(path) = row.get::<_, String>(0) {
+                    out.push(path);
+                }
+                if out.len() == 10 {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Diagnostic and repair engine for ContextSlice SQLite index databases.
 pub struct Doctor;
 
@@ -150,7 +169,10 @@ impl Doctor {
             // 5. Referential and Hash Invariants
             Self::check_referential_integrity(conn, &mut diagnostics);
 
-            // 6. Statistics & Health Metrics
+            // 6. Derived Projection Invariants
+            Self::check_projection_completeness(conn, &mut diagnostics);
+
+            // 7. Statistics & Health Metrics
             Self::check_health_metrics(conn, &mut diagnostics);
         }
 
@@ -185,6 +207,21 @@ impl Doctor {
                 )]);
             }
         };
+
+        // A read-only diagnostic handle cannot re-journal the file it is
+        // diagnosing, so only the fail-fast half of the connection contract
+        // applies here; without it rusqlite's default 5-second busy timeout
+        // turns a locked index into a stall before the first diagnostic.
+        if let Err(e) = conn.execute_batch("PRAGMA busy_timeout = 0") {
+            return Ok(vec![DoctorDiagnostic::error(
+                "CANNOT_OPEN",
+                format!(
+                    "Failed to configure read-only connection at {}: {e}",
+                    path.display()
+                ),
+                Vec::new(),
+            )]);
+        }
 
         Ok(Self::check(&conn))
     }
@@ -230,6 +267,7 @@ impl Doctor {
                      DELETE FROM packages;
                      UPDATE meta SET value = 'empty' WHERE key = 'index_state';
                      DELETE FROM meta WHERE key = 'snapshot_id';
+                     DELETE FROM meta WHERE key = 'update_in_progress';
                      PRAGMA foreign_keys = ON;
                      VACUUM;",
                 )?;
@@ -240,6 +278,11 @@ impl Doctor {
 
     /// Open an index file and apply the given repair policy.
     ///
+    /// The connection carries the same contract as
+    /// [`IndexDatabase::open_or_create`] (WAL, `synchronous=NORMAL`,
+    /// `foreign_keys=ON`, no busy timeout), and its failures are classified
+    /// the same way.
+    ///
     /// # Errors
     ///
     /// Returns [`IndexError`] if opening or repairing fails.
@@ -249,6 +292,8 @@ impl Doctor {
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(|e| IndexDatabase::classify(path, e))?;
+
+        IndexDatabase::apply_connection_contract(&conn, path)?;
 
         Self::repair(&mut conn, policy).map_err(|e| IndexDatabase::classify(path, e))
     }
@@ -478,6 +523,29 @@ impl Doctor {
             }
             _ => {}
         }
+
+        // Torn incremental update: an update's fact transaction committed but
+        // its finalize (snapshot_id + marker clear) never ran.
+        Self::check_torn_update_marker(conn, diags);
+    }
+
+    /// Surface a lingering incremental-update marker: facts are new while
+    /// derived rows may lag or be missing; the next incremental run repairs
+    /// it.
+    fn check_torn_update_marker(conn: &Connection, diags: &mut Vec<DoctorDiagnostic>) {
+        let marker: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![crate::incremental::UPDATE_IN_PROGRESS_KEY],
+                |r| r.get(0),
+            )
+            .ok();
+        if marker.is_some() {
+            diags.push(DoctorDiagnostic::warning(
+                "UPDATE_INCOMPLETE",
+                "A previous incremental update committed its facts but never finalized (meta.update_in_progress is set); derived rows and snapshot_id may be stale until the next update repairs them",
+            ));
+        }
     }
 
     fn check_required_tables(conn: &Connection, diags: &mut Vec<DoctorDiagnostic>) -> bool {
@@ -525,16 +593,20 @@ impl Doctor {
     }
 
     fn check_referential_integrity(conn: &Connection, diags: &mut Vec<DoctorDiagnostic>) {
-        // Files consistency check matching schema constraints:
-        // 1. skip = 'too_large' <=> hash IS NULL
-        // 2. hash IS NOT NULL OR parse_status = 'skipped'
+        // Files consistency check: the negation of the schema v2 files
+        // CHECK (schema.rs, ADR-022 D1), mirrored here so doctor flags
+        // exactly the rows the schema would have rejected — rows that can
+        // only exist in a database written by an older schema or a foreign
+        // tool, which is what this check exists to diagnose.
         let files_inconsistent: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM files \
-                 WHERE (skip = 'too_large' AND hash IS NOT NULL) \
-                    OR (skip != 'too_large' AND hash IS NULL) \
-                    OR (skip IS NULL AND hash IS NULL) \
-                    OR (hash IS NULL AND parse_status != 'skipped')",
+                 WHERE NOT ( \
+                    (hash IS NULL \
+                        AND COALESCE(skip, '') IN ('too_large', 'unreadable') \
+                        AND parse_status = 'skipped') \
+                    OR (hash IS NOT NULL AND (skip IS NULL OR skip = 'parse_skipped')) \
+                 )",
                 [],
                 |r| r.get(0),
             )
@@ -605,6 +677,84 @@ impl Doctor {
                 "REFERENTIAL_INTEGRITY_VIOLATIONS",
                 "Detected referential integrity violations",
                 dangling_details,
+            ));
+        }
+    }
+
+    /// The derived-projection invariants, derived from the Pass-3 write
+    /// contract: the resolver emits one bindings row for every reference of
+    /// every `.go` file in a package (unbound refs are recorded with an
+    /// `unbound_reason` — being unbound is written, not absent), and
+    /// classifies every import of such a file (`resolved_dir`/`resolved_file`
+    /// set, or `unresolved_reason`). Files outside any package are facts
+    /// only; the resolver never touches them, so they are excluded from both
+    /// predicates. A violation means the projection does not match the facts
+    /// — a torn or lost derived write.
+    fn check_projection_completeness(conn: &Connection, diags: &mut Vec<DoctorDiagnostic>) {
+        // References of package files with no bindings row at all.
+        let missing_bindings: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM refs r JOIN files f ON f.id = r.file_id \
+                 WHERE f.package_id IS NOT NULL AND f.path GLOB '*.go' \
+                 AND NOT EXISTS (SELECT 1 FROM bindings b WHERE b.ref_id = r.id)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        if missing_bindings > 0 {
+            let mut details = sample_paths(
+                conn,
+                "SELECT DISTINCT f.path FROM refs r JOIN files f ON f.id = r.file_id \
+                 WHERE f.package_id IS NOT NULL AND f.path GLOB '*.go' \
+                 AND NOT EXISTS (SELECT 1 FROM bindings b WHERE b.ref_id = r.id)",
+            );
+            details.insert(
+                0,
+                format!("{missing_bindings} references have no bindings row at all"),
+            );
+            diags.push(DoctorDiagnostic::error(
+                "PROJECTION_INCOMPLETE",
+                "References of package files are missing their bindings rows",
+                details,
+            ));
+        }
+
+        // Imports of package files with no resolution and no reason.
+        let unclassified_imports: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM imports i JOIN files f ON f.id = i.file_id \
+                 WHERE f.package_id IS NOT NULL AND f.path GLOB '*.go' \
+                 AND i.resolved_dir IS NULL AND i.resolved_file IS NULL \
+                 AND i.unresolved_reason IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        if unclassified_imports > 0 {
+            let mut details = sample_paths(
+                conn,
+                "SELECT DISTINCT f.path FROM imports i JOIN files f ON f.id = i.file_id \
+                 WHERE f.package_id IS NOT NULL AND f.path GLOB '*.go' \
+                 AND i.resolved_dir IS NULL AND i.resolved_file IS NULL \
+                 AND i.unresolved_reason IS NULL",
+            );
+            details.insert(
+                0,
+                format!("{unclassified_imports} imports carry no resolution and no reason"),
+            );
+            diags.push(DoctorDiagnostic::error(
+                "IMPORTS_UNCLASSIFIED",
+                "Imports of package files were never classified by the resolver",
+                details,
+            ));
+        }
+
+        if missing_bindings == 0 && unclassified_imports == 0 {
+            diags.push(DoctorDiagnostic::info(
+                "DERIVED_PROJECTION",
+                "Derived projection complete: every reference of a package file carries a binding row and every import is classified",
             ));
         }
     }
@@ -730,8 +880,17 @@ impl Doctor {
 mod tests {
     use super::*;
     use crate::facts::{ingest_facts, DEFAULT_CONFIG_FINGERPRINT, DEFAULT_FACT_BATCH_SIZE};
+    use crate::incremental::{apply_fact_changes, plan_incremental, UPDATE_IN_PROGRESS_KEY};
     use crate::IndexDatabase;
     use cs_scanner::{scan, ScanConfig};
+
+    fn write_file(root: &Path, rel: &str, content: &[u8]) {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
 
     #[test]
     fn doctor_reports_clean_on_fresh_empty_database() {
@@ -795,6 +954,69 @@ mod tests {
     }
 
     #[test]
+    fn doctor_accepts_scanner_unreadable_rows() {
+        // The schema v2 truth table admits (hash NULL, skip 'unreadable',
+        // parse_status 'skipped'); doctor must not flag that row as
+        // inconsistent. Runtime canary: root reads through chmod 000, in
+        // which case the scanner would not report Unreadable at all and the
+        // premise does not hold — skip honestly rather than pass vacuously.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let canary_dir = tempfile::tempdir().unwrap();
+            let canary = canary_dir.path().join("canary");
+            std::fs::write(&canary, b"x").unwrap();
+            let mut perms = std::fs::metadata(&canary).unwrap().permissions();
+            perms.set_mode(0o0);
+            std::fs::set_permissions(&canary, perms).unwrap();
+            if std::fs::read(&canary).is_ok() {
+                eprintln!("skipping: chmod 000 does not deny reads for this user");
+                return;
+            }
+
+            let temp = tempfile::tempdir().expect("tree");
+            write_file(temp.path(), "go.mod", b"module example.com/test\n");
+            write_file(temp.path(), "a.go", b"package p\n\nfunc A() {}\n");
+            write_file(temp.path(), "locked.go", b"package p\n\nfunc Locked() {}\n");
+            let locked = temp.path().join("locked.go");
+            let mut perms = std::fs::metadata(&locked).unwrap().permissions();
+            perms.set_mode(0o0);
+            std::fs::set_permissions(&locked, perms).unwrap();
+
+            let db_dir = tempfile::tempdir().expect("db dir");
+            let mut db =
+                IndexDatabase::open_or_create(&db_dir.path().join("index.db")).expect("open");
+            let scanned = scan(temp.path(), &ScanConfig::default()).expect("scan");
+            db.begin_build(DEFAULT_CONFIG_FINGERPRINT)
+                .expect("begin_build");
+            ingest_facts(&mut db, temp.path(), &scanned, DEFAULT_FACT_BATCH_SIZE).expect("ingest");
+            db.resolve_facts().expect("resolve");
+
+            let (skip, hash): (Option<String>, Option<Vec<u8>>) = db
+                .connection()
+                .query_row(
+                    "SELECT skip, hash FROM files WHERE path = 'locked.go'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .expect("unreadable row");
+            assert_eq!(skip.as_deref(), Some("unreadable"));
+            assert!(hash.is_none());
+
+            let diags = Doctor::check(db.connection());
+            let errors: Vec<_> = diags
+                .iter()
+                .filter(|d| d.severity == DiagnosticSeverity::Error)
+                .collect();
+            assert!(
+                errors.is_empty(),
+                "an unreadable file is a legal v2 row: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
     fn doctor_detects_interrupted_building_state() {
         let temp = tempfile::tempdir().expect("tempdir");
         let db_path = temp.path().join("index.db");
@@ -811,6 +1033,103 @@ mod tests {
             warnings.len(),
             1,
             "Interrupted building state must produce warning"
+        );
+    }
+
+    #[test]
+    fn doctor_detects_torn_update_projection_before_repair_and_clean_after() {
+        let tmp = tempfile::tempdir().expect("tree");
+        let root = tmp.path();
+        write_file(root, "go.mod", b"module example.com/test\n");
+        write_file(root, "auth/auth.go", b"package auth\nfunc Login() {}\n");
+        write_file(
+            root,
+            "web/web.go",
+            b"package web\nimport \"example.com/test/auth\"\nfunc Handler() { auth.Login() }\n",
+        );
+
+        let db_dir = tempfile::tempdir().expect("db dir");
+        let mut db = IndexDatabase::open_or_create(&db_dir.path().join("index.db")).expect("open");
+        let files = scan(root, &ScanConfig::default()).expect("scan");
+        ingest_facts(&mut db, root, &files, DEFAULT_FACT_BATCH_SIZE).expect("ingest");
+        db.resolve_facts().expect("resolve");
+
+        // Tear the index: commit an update's fact transaction and stop. The
+        // modified file's refs lost their bindings to the FK cascade and its
+        // new import rows carry no resolution.
+        write_file(
+            root,
+            "web/web.go",
+            b"package web\nimport \"example.com/test/auth\"\nfunc Handler() { auth.Logout() }\n",
+        );
+        let files_after = scan(root, &ScanConfig::default()).expect("rescan");
+        let mut run = plan_incremental(&db, &files_after).expect("plan");
+        apply_fact_changes(&mut db, root, &mut run).expect("facts phase only");
+
+        let diags = Doctor::check(db.connection());
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == "PROJECTION_INCOMPLETE"
+                    && d.severity == DiagnosticSeverity::Error),
+            "refs with no bindings row at all must be flagged: {diags:#?}"
+        );
+        assert!(
+            diags.iter().any(
+                |d| d.code == "IMPORTS_UNCLASSIFIED" && d.severity == DiagnosticSeverity::Error
+            ),
+            "imports with all resolution columns NULL must be flagged: {diags:#?}"
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "UPDATE_INCOMPLETE"),
+            "the lingering torn-update marker must be surfaced: {diags:#?}"
+        );
+
+        // Repair through the ordinary update path; doctor must come back clean.
+        crate::incremental::update_incremental(&mut db, root, &files_after)
+            .expect("repairing update");
+
+        let diags = Doctor::check(db.connection());
+        assert!(
+            diags.iter().any(|d| d.code == "DERIVED_PROJECTION"),
+            "a healthy projection must be reported: {diags:#?}"
+        );
+        for gone in [
+            "UPDATE_INCOMPLETE",
+            "PROJECTION_INCOMPLETE",
+            "IMPORTS_UNCLASSIFIED",
+        ] {
+            assert!(
+                !diags.iter().any(|d| d.code == gone),
+                "{gone} must clear after repair: {diags:#?}"
+            );
+        }
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == DiagnosticSeverity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "repaired index must be error-free: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn doctor_repair_reset_clears_torn_update_marker() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("index.db");
+        let mut db = IndexDatabase::open_or_create(&db_path).expect("open");
+        db.connection()
+            .execute(
+                "INSERT INTO meta (key, value) VALUES (?1, '1')",
+                [UPDATE_IN_PROGRESS_KEY],
+            )
+            .expect("plant marker");
+
+        Doctor::repair(db.connection_mut(), RepairPolicy::ResetToEmpty).expect("repair");
+        assert!(
+            db.meta(UPDATE_IN_PROGRESS_KEY).expect("meta").is_none(),
+            "a reset index must not keep the torn-update marker"
         );
     }
 
@@ -893,5 +1212,45 @@ mod tests {
         let diags = Doctor::check_file(missing).expect("check_file");
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, "FILE_NOT_FOUND");
+    }
+
+    #[test]
+    fn repair_file_against_locked_index_fails_fast_as_locked() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("index.db");
+        drop(IndexDatabase::open_or_create(&db_path).expect("open"));
+
+        let blocker = Connection::open(&db_path).expect("blocker");
+        blocker
+            .execute_batch("PRAGMA busy_timeout = 0")
+            .expect("no timeout");
+        blocker
+            .execute("BEGIN IMMEDIATE", [])
+            .expect("take write lock");
+
+        // Doctor's own connection must carry the open_or_create contract:
+        // without an explicit busy timeout, rusqlite's 5 s default turns a
+        // locked index into a stall before the error.
+        let started = std::time::Instant::now();
+        let err = Doctor::repair_file(&db_path, RepairPolicy::ResetToEmpty).expect_err("blocked");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(50),
+            "must fail fast, stalled {:?}",
+            started.elapsed()
+        );
+        assert!(matches!(err, IndexError::Locked), "got {err:?}");
+
+        // Diagnosis under the same lock reports instead of stalling.
+        let started = std::time::Instant::now();
+        let diags = Doctor::check_file(&db_path).expect("check");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(50),
+            "must report fast, stalled {:?}",
+            started.elapsed()
+        );
+        assert!(!diags.is_empty());
+
+        blocker.execute("ROLLBACK", []).expect("release");
+        Doctor::repair_file(&db_path, RepairPolicy::ResetToEmpty).expect("repair after release");
     }
 }

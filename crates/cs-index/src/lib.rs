@@ -12,10 +12,11 @@
 //! [`IndexState::Building`] before the first fact batch (slices refuse to
 //! read it; `index` resumes — the hash-driven fact pass skips completed
 //! batches for free) and flips it to [`IndexState::Ready`] atomically with
-//! the final `snapshot_id`. Incremental runs stay `Ready` throughout: per-
-//! file and per-package transaction atomicity make every committed state
-//! coherent, so a crash mid-run leaves an index that is merely as-of an
-//! earlier prefix.
+//! the final `snapshot_id`. Incremental runs stay `Ready` throughout: the
+//! facts transaction plants `update_in_progress` and the finalize
+//! transaction clears it atomically with the new `snapshot_id`
+//! (ADR-022 D4), so a crash mid-run leaves a marked torn window that the
+//! next run and `doctor` detect and repair with a full derived rebuild.
 //!
 //! # Not a security boundary
 //!
@@ -148,6 +149,10 @@ impl fmt::Display for IndexState {
     }
 }
 
+/// How many tables a complete index carries: `meta` plus the nine fact and
+/// derived tables of the frozen schema. The open gate requires all of them.
+const REQUIRED_TABLE_COUNT: i64 = 10;
+
 /// An open connection to an index database, with the lifecycle pragmas
 /// applied and the schema version gate passed.
 ///
@@ -186,47 +191,7 @@ impl IndexDatabase {
             }
         }
         let mut conn = Connection::open(path).map_err(|e| Self::classify(path, e))?;
-
-        // WAL first: it is the crash-consistency contract (D3) and a
-        // filesystem that cannot provide it must fail loudly, not silently
-        // downgrade to rollback-journal semantics.
-        let journal: String = conn
-            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
-            .map_err(|e| Self::classify(path, e))?;
-        if journal != "wal" {
-            return Err(IndexError::Corrupt {
-                path: path.to_path_buf(),
-                detail: format!("cannot enable WAL journaling (filesystem returned '{journal}')"),
-            });
-        }
-        conn.execute_batch("PRAGMA synchronous=NORMAL")
-            .map_err(|e| Self::classify(path, e))?;
-        conn.execute_batch("PRAGMA foreign_keys=ON")
-            .map_err(|e| Self::classify(path, e))?;
-        let fk_enforced: i64 = conn
-            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
-            .map_err(|e| Self::classify(path, e))?;
-        if fk_enforced != 1 {
-            return Err(IndexError::Corrupt {
-                path: path.to_path_buf(),
-                detail: "SQLite refused to enable foreign key enforcement".to_owned(),
-            });
-        }
-        // Fail fast on writer contention (ARCHITECTURE §4.4): rusqlite
-        // silently installs a 5-second busy timeout at open; the contract
-        // is zero. Verified below like every other pragma, because a hung
-        // second indexer is a worse failure mode than a clear error.
-        conn.execute_batch("PRAGMA busy_timeout=0")
-            .map_err(|e| Self::classify(path, e))?;
-        let busy_timeout: i64 = conn
-            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
-            .map_err(|e| Self::classify(path, e))?;
-        if busy_timeout != 0 {
-            return Err(IndexError::Corrupt {
-                path: path.to_path_buf(),
-                detail: format!("cannot disable the busy timeout (got {busy_timeout} ms)"),
-            });
-        }
+        Self::apply_connection_contract(&conn, path)?;
 
         let has_meta: bool = conn
             .query_row(
@@ -316,24 +281,26 @@ impl IndexDatabase {
     /// `config_fingerprint` (parse/read caps + grammar/query pins) whose
     /// change later signals that file classification may be stale.
     ///
+    /// The flip is a guarded UPDATE (`AND value = 'empty'`) with a
+    /// rows-affected check, so two concurrent builders cannot both pass a
+    /// read-then-write race and both believe they own the build.
+    ///
     /// # Errors
     ///
     /// [`IndexError::StateConflict`] unless the state is `Empty`.
     pub fn begin_build(&mut self, config_fingerprint: &str) -> Result<(), IndexError> {
-        let state = self.state()?;
-        if state != IndexState::Empty {
-            return Err(IndexError::StateConflict {
-                found: state,
-                expected: "empty",
-            });
-        }
         let path = self.path.clone();
         let txn = self.transaction()?;
-        txn.execute(
-            "UPDATE meta SET value = 'building' WHERE key = 'index_state'",
-            [],
-        )
-        .map_err(|e| Self::classify(&path, e))?;
+        let flipped = txn
+            .execute(
+                "UPDATE meta SET value = 'building' \
+                 WHERE key = 'index_state' AND value = 'empty'",
+                [],
+            )
+            .map_err(|e| Self::classify(&path, e))?;
+        if flipped == 0 {
+            return Err(Self::state_conflict(&txn, &path, "empty"));
+        }
         txn.execute(
             "INSERT INTO meta (key, value) VALUES ('config_fingerprint', ?1) \
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -346,26 +313,25 @@ impl IndexDatabase {
     /// Complete a full build: `Building → Ready`, committing the
     /// `snapshot_id` (blake3 over the sorted `(path, hash)` pairs) in the
     /// same transaction as the flip, so a ready index always names its
-    /// content.
+    /// content. Like `begin_build`, the flip is guarded
+    /// (`AND value = 'building'`) and checked by rows affected.
     ///
     /// # Errors
     ///
     /// [`IndexError::StateConflict`] unless the state is `Building`.
     pub fn mark_ready(&mut self, snapshot_id: &str) -> Result<(), IndexError> {
-        let state = self.state()?;
-        if state != IndexState::Building {
-            return Err(IndexError::StateConflict {
-                found: state,
-                expected: "building",
-            });
-        }
         let path = self.path.clone();
         let txn = self.transaction()?;
-        txn.execute(
-            "UPDATE meta SET value = 'ready' WHERE key = 'index_state'",
-            [],
-        )
-        .map_err(|e| Self::classify(&path, e))?;
+        let flipped = txn
+            .execute(
+                "UPDATE meta SET value = 'ready' \
+                 WHERE key = 'index_state' AND value = 'building'",
+                [],
+            )
+            .map_err(|e| Self::classify(&path, e))?;
+        if flipped == 0 {
+            return Err(Self::state_conflict(&txn, &path, "building"));
+        }
         txn.execute(
             "INSERT INTO meta (key, value) VALUES ('snapshot_id', ?1) \
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -373,6 +339,26 @@ impl IndexDatabase {
         )
         .map_err(|e| Self::classify(&path, e))?;
         txn.commit().map_err(|e| Self::classify(&path, e))
+    }
+
+    /// Read the current state for a [`IndexError::StateConflict`] report
+    /// after a guarded lifecycle UPDATE matched no rows; a missing or
+    /// unparsable row upgrades the report to [`IndexError::Corrupt`].
+    fn state_conflict(conn: &Connection, path: &Path, expected: &'static str) -> IndexError {
+        match Self::meta_value(conn, path, "index_state") {
+            Ok(Some(raw)) => match IndexState::parse(&raw) {
+                Some(found) => IndexError::StateConflict { found, expected },
+                None => IndexError::Corrupt {
+                    path: path.to_path_buf(),
+                    detail: format!("meta.index_state is '{raw}'"),
+                },
+            },
+            Ok(None) => IndexError::Corrupt {
+                path: path.to_path_buf(),
+                detail: "meta.index_state is missing".to_owned(),
+            },
+            Err(e) => e,
+        }
     }
 
     /// Open a write transaction (drop = rollback, `commit()` = durable
@@ -485,37 +471,91 @@ impl IndexDatabase {
         Doctor::repair(&mut self.conn, policy).map_err(|e| Self::classify(&self.path, e))
     }
 
-    /// Map a busy/locked SQLite failure to [`IndexError::Locked`], leaving
-    /// everything else intact.
-    fn lock(path: &Path, err: rusqlite::Error) -> IndexError {
-        if matches!(
-            err.sqlite_error_code(),
-            Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
-        ) {
-            IndexError::Locked
-        } else {
-            Self::classify(path, err)
+    /// The ADR-021 connection contract, shared by every read-write
+    /// connection this crate opens (including doctor's): WAL journaling,
+    /// `synchronous=NORMAL`, `foreign_keys=ON`, no busy timeout. Each
+    /// pragma is verified on the live connection, not assumed from the
+    /// execute call's success.
+    pub(crate) fn apply_connection_contract(
+        conn: &Connection,
+        path: &Path,
+    ) -> Result<(), IndexError> {
+        // WAL first: it is the crash-consistency contract (D3) and a
+        // filesystem that cannot provide it must fail loudly, not silently
+        // downgrade to rollback-journal semantics.
+        let journal: String = conn
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            .map_err(|e| Self::classify(path, e))?;
+        if journal != "wal" {
+            return Err(IndexError::Corrupt {
+                path: path.to_path_buf(),
+                detail: format!("cannot enable WAL journaling (filesystem returned '{journal}')"),
+            });
         }
+        conn.execute_batch("PRAGMA synchronous=NORMAL")
+            .map_err(|e| Self::classify(path, e))?;
+        conn.execute_batch("PRAGMA foreign_keys=ON")
+            .map_err(|e| Self::classify(path, e))?;
+        let fk_enforced: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .map_err(|e| Self::classify(path, e))?;
+        if fk_enforced != 1 {
+            return Err(IndexError::Corrupt {
+                path: path.to_path_buf(),
+                detail: "SQLite refused to enable foreign key enforcement".to_owned(),
+            });
+        }
+        // Fail fast on writer contention (ARCHITECTURE §4.4): rusqlite
+        // silently installs a 5-second busy timeout at open; the contract
+        // is zero. Verified like every other pragma, because a hung second
+        // indexer is a worse failure mode than a clear error.
+        conn.execute_batch("PRAGMA busy_timeout=0")
+            .map_err(|e| Self::classify(path, e))?;
+        let busy_timeout: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .map_err(|e| Self::classify(path, e))?;
+        if busy_timeout != 0 {
+            return Err(IndexError::Corrupt {
+                path: path.to_path_buf(),
+                detail: format!("cannot disable the busy timeout (got {busy_timeout} ms)"),
+            });
+        }
+        Ok(())
+    }
+
+    /// Map a busy/locked SQLite failure to [`IndexError::Locked`], leaving
+    /// everything else to `classify`, which owns that mapping.
+    fn lock(path: &Path, err: rusqlite::Error) -> IndexError {
+        Self::classify(path, err)
     }
 
     /// Classify a raw SQLite failure against the index path: not-a-database
-    /// files are corrupt-or-foreign, everything else is reported verbatim.
+    /// files are corrupt-or-foreign, busy or locked databases fail fast as
+    /// [`IndexError::Locked`], everything else is reported verbatim.
+    ///
+    /// This is the single funnel for statement, prepare, and commit
+    /// failures: a deferred BEGIN takes no write lock under WAL, so real
+    /// contention first surfaces on the write statement or the commit —
+    /// here, not at the transaction open.
     pub(crate) fn classify(path: &Path, err: rusqlite::Error) -> IndexError {
-        if matches!(err.sqlite_error_code(), Some(ErrorCode::NotADatabase)) {
-            IndexError::Corrupt {
+        match err.sqlite_error_code() {
+            Some(ErrorCode::NotADatabase) => IndexError::Corrupt {
                 path: path.to_path_buf(),
                 detail: "file is not an SQLite database".to_owned(),
-            }
-        } else {
-            IndexError::Sqlite {
+            },
+            Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => IndexError::Locked,
+            _ => IndexError::Sqlite {
                 path: path.to_path_buf(),
                 source: err,
-            }
+            },
         }
     }
 
-    /// The version gate for an existing database: exact version match and
-    /// a parseable lifecycle state, or the open fails.
+    /// The version gate for an existing database: exact version match, a
+    /// parseable lifecycle state, all ten schema tables present, and — for
+    /// `ready` — the `snapshot_id` a completed build commits with its flip.
+    /// Meta strings alone do not make an index: a table-less file claiming
+    /// `ready` must fail the open, not the first query.
     fn validate_existing(conn: &Connection, path: &Path) -> Result<(), IndexError> {
         let version: Option<String> = Self::meta_value(conn, path, "schema_version")?;
         let Some(version) = version else {
@@ -535,16 +575,47 @@ impl IndexDatabase {
             });
         }
         let state: Option<String> = Self::meta_value(conn, path, "index_state")?;
-        match state.as_deref().and_then(IndexState::parse) {
-            Some(_) => Ok(()),
-            None => Err(IndexError::Corrupt {
+        let state = state
+            .as_deref()
+            .and_then(IndexState::parse)
+            .ok_or_else(|| IndexError::Corrupt {
                 path: path.to_path_buf(),
                 detail: format!(
                     "meta.index_state is {}",
                     state.as_deref().unwrap_or("missing")
                 ),
-            }),
+            })?;
+        let tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN \
+                 ('meta', 'packages', 'files', 'symbols', 'refs', 'imports', 'manifests', \
+                  'bindings', 'binding_targets', 'edges')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| Self::classify(path, e))?;
+        if tables != REQUIRED_TABLE_COUNT {
+            return Err(IndexError::Corrupt {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "only {tables} of the {REQUIRED_TABLE_COUNT} required tables exist"
+                ),
+            });
         }
+        if state == IndexState::Ready {
+            match Self::meta_value(conn, path, "snapshot_id")? {
+                Some(snapshot) if !snapshot.is_empty() => {}
+                _ => {
+                    return Err(IndexError::Corrupt {
+                        path: path.to_path_buf(),
+                        detail: "index_state is 'ready' but meta.snapshot_id is \
+                                 missing or empty"
+                            .to_owned(),
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -565,7 +636,7 @@ mod tests {
         assert_eq!(db.state().expect("state"), IndexState::Empty);
         assert_eq!(
             db.meta("schema_version").expect("meta").as_deref(),
-            Some("1")
+            Some(SCHEMA_VERSION.to_string().as_str())
         );
 
         // The pragmas are the crash-consistency and integrity contract
@@ -665,7 +736,7 @@ mod tests {
                 err,
                 IndexError::SchemaMismatch {
                     found: 999,
-                    expected: 1
+                    expected: SCHEMA_VERSION
                 }
             ),
             "got {err:?}"
@@ -798,6 +869,151 @@ mod tests {
         txn.execute("INSERT INTO meta (key, value) VALUES ('probe', 'ok')", [])
             .expect("write after release");
         txn.commit().expect("commit");
+    }
+
+    #[test]
+    fn blocked_writer_surfaces_locked_on_begin_build() {
+        let (_dir, path) = temp_index();
+        let mut db = IndexDatabase::open_or_create(&path).expect("open");
+
+        let blocker = Connection::open(&path).expect("second connection");
+        blocker
+            .execute_batch("PRAGMA busy_timeout = 0")
+            .expect("no timeout");
+        blocker
+            .execute("BEGIN IMMEDIATE", [])
+            .expect("take write lock");
+
+        // `BEGIN DEFERRED` takes no write lock under WAL, so the conflict
+        // surfaces at the state flip itself — as `Locked`, immediately, not
+        // as a raw SQLite error.
+        let started = std::time::Instant::now();
+        let err = db.begin_build("fp").expect_err("blocked");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(50),
+            "must fail fast, stalled {:?}",
+            started.elapsed()
+        );
+        assert!(matches!(err, IndexError::Locked), "got {err:?}");
+
+        blocker.execute("ROLLBACK", []).expect("release");
+        db.begin_build("fp").expect("begin after release");
+    }
+
+    #[test]
+    fn blocked_writer_surfaces_locked_on_fact_write() {
+        let (_dir, path) = temp_index();
+        let mut db = IndexDatabase::open_or_create(&path).expect("open");
+        db.begin_build("fp").expect("begin");
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates dir")
+            .parent()
+            .expect("workspace")
+            .join("fixtures/go-resolve");
+        let scanned = cs_scanner::scan(&root, &cs_scanner::ScanConfig::default()).expect("scan");
+
+        let blocker = Connection::open(&path).expect("second connection");
+        blocker
+            .execute_batch("PRAGMA busy_timeout = 0")
+            .expect("no timeout");
+        blocker
+            .execute("BEGIN IMMEDIATE", [])
+            .expect("take write lock");
+
+        let started = std::time::Instant::now();
+        let err = db.ingest_facts(&root, &scanned).expect_err("blocked");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(50),
+            "must fail fast, stalled {:?}",
+            started.elapsed()
+        );
+        assert!(matches!(err, IndexError::Locked), "got {err:?}");
+
+        blocker.execute("ROLLBACK", []).expect("release");
+        db.ingest_facts(&root, &scanned)
+            .expect("ingest after release");
+    }
+
+    #[test]
+    fn meta_only_file_with_valid_strings_is_corrupt_on_open() {
+        // Meta strings alone must not pass the open gate: `ready` is a claim
+        // that the whole schema and its snapshot exist.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("index.db");
+        {
+            let conn = Connection::open(&path).expect("raw open");
+            conn.execute(
+                "CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)",
+                [],
+            )
+            .expect("meta");
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)",
+                [SCHEMA_VERSION.to_string()],
+            )
+            .expect("version");
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('index_state', 'ready')",
+                [],
+            )
+            .expect("state");
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('snapshot_id', ?1)",
+                ["a".repeat(64)],
+            )
+            .expect("snapshot");
+        }
+        let err = IndexDatabase::open_or_create(&path).expect_err("must refuse");
+        assert!(matches!(err, IndexError::Corrupt { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn dropped_data_table_is_corrupt_on_open() {
+        let (_dir, path) = temp_index();
+        IndexDatabase::open_or_create(&path).expect("open");
+        {
+            let conn = Connection::open(&path).expect("raw open");
+            conn.execute("DROP TABLE files", []).expect("drop");
+        }
+        let err = IndexDatabase::open_or_create(&path).expect_err("must refuse");
+        assert!(matches!(err, IndexError::Corrupt { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn ready_without_a_snapshot_id_is_corrupt_on_open() {
+        let (_dir, path) = temp_index();
+        {
+            let mut db = IndexDatabase::open_or_create(&path).expect("open");
+            db.begin_build("fp").expect("begin");
+            // A torn finalize: the flip landed, the snapshot did not.
+            db.connection()
+                .execute(
+                    "UPDATE meta SET value = 'ready' WHERE key = 'index_state'",
+                    [],
+                )
+                .expect("flip");
+        }
+        let err = IndexDatabase::open_or_create(&path).expect_err("must refuse");
+        assert!(matches!(err, IndexError::Corrupt { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn ready_with_empty_snapshot_id_is_corrupt_on_open() {
+        let (_dir, path) = temp_index();
+        {
+            let mut db = IndexDatabase::open_or_create(&path).expect("open");
+            db.begin_build("fp").expect("begin");
+            db.connection()
+                .execute_batch(
+                    "UPDATE meta SET value = 'ready' WHERE key = 'index_state';
+                     INSERT INTO meta (key, value) VALUES ('snapshot_id', '');",
+                )
+                .expect("flip with empty snapshot");
+        }
+        let err = IndexDatabase::open_or_create(&path).expect_err("must refuse");
+        assert!(matches!(err, IndexError::Corrupt { .. }), "got {err:?}");
     }
 
     #[test]

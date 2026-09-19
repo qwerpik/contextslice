@@ -65,7 +65,9 @@ pub struct PackageExported {
 pub struct ExportedIndex {
     /// Blake3 content hash across all indexed files in sorted path order.
     pub snapshot_id: String,
-    /// Sorted list of modules from longest dir to shortest (root last).
+    /// Sorted list of modules from longest dir to shortest. Always ends with
+    /// a root entry (dir `""`): the real root module when a root manifest
+    /// exists, a synthetic one (`""` path) otherwise.
     pub modules: Vec<ModuleInfo>,
     /// Directory → sorted package names present in that directory.
     pub package_dirs: BTreeMap<String, Vec<String>>,
@@ -330,7 +332,11 @@ pub fn build_exported_index(
         }
     }
 
-    if modules.is_empty() {
+    // `nearest_module` falls back to the list's last entry, so a tree whose
+    // only manifests live in subdirectories must still end with a root
+    // entry — otherwise root-level files are attributed to the deepest
+    // sub-module.
+    if !modules.iter().any(|m| m.dir.is_empty()) {
         modules.push(ModuleInfo {
             dir: String::new(),
             path: String::new(),
@@ -513,6 +519,45 @@ mod tests {
         assert!(
             nested_pkg.exported.contains_key("Cross"),
             "exported function Cross must be in exported index"
+        );
+    }
+
+    #[test]
+    fn sub_module_only_tree_attributes_root_files_to_root_fallback() {
+        let tmp = tempdir().unwrap();
+        write_file(tmp.path(), "sub/go.mod", b"module example.com/sub\n");
+        write_file(
+            tmp.path(),
+            "sub/util/util.go",
+            b"package util\nfunc U() {}\n",
+        );
+        write_file(tmp.path(), "root.go", b"package main\nfunc main() {}\n");
+
+        let files = scan(tmp.path(), &ScanConfig::default()).unwrap();
+        let db_path = tmp.path().join("index.db");
+        let mut db = IndexDatabase::open_or_create(&db_path).unwrap();
+        ingest_facts(&mut db, tmp.path(), &files, 100).unwrap();
+
+        let index = db.build_exported_index().unwrap();
+
+        // The only manifest lives in sub/; the root file (dir "") must still
+        // map to the root pseudo-module, never to the sub module.
+        let root_nearest = index.nearest_module(dir_of("root.go"));
+        assert_eq!(
+            root_nearest.dir, "",
+            "a root-level file must map to the root pseudo-module, not the deepest manifest's module"
+        );
+        assert_eq!(root_nearest.path, "");
+
+        // Files under sub/ keep mapping to the sub module, deepest first.
+        assert_eq!(index.nearest_module("sub").path, "example.com/sub");
+        assert_eq!(index.nearest_module("sub/util").path, "example.com/sub");
+
+        // The invariant nearest_module relies on: the list ends with a root entry.
+        assert_eq!(
+            index.modules.last().expect("modules non-empty").dir,
+            "",
+            "module list must always end with a root entry"
         );
     }
 

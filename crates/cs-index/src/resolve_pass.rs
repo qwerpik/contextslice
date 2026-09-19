@@ -9,17 +9,25 @@
 //!    directly to SQLite within a single package transaction.
 //! 4. Clears package-local definitions from memory, keeping peak RSS bounded.
 //! 5. Commits `snapshot_id` and flips `index_state` to `'ready'` atomically.
+//!
+//! The per-package writer lives in the shared `DeriveEngine` so the cold
+//! path, the incremental derived phase, and torn-update repair share one
+//! definition of the projection. It pre-clears every derived row it is
+//! about to write, so re-running against facts that already carry derived
+//! rows — a resumed build, or repair after a torn incremental — converges
+//! to exactly the fresh-build rows: no duplicates, no orphans.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use cs_extract::{DefKind, ImportKind, ParseStatus, RefKind, Span};
 use cs_resolve::{
     go::{GoResolver, ModuleInfo, Package as GoPackage},
     ref_def_weight, DefLoc, FilePath, Resolution, ResolutionStats, W_IMPORT_OUT, W_TEST_AFFINITY,
 };
-use rusqlite::params;
+use rusqlite::{params, Connection};
 
-use crate::index_pass::{build_exported_index, parse_def_kind};
+use crate::index_pass::{build_exported_index, parse_def_kind, ExportedIndex};
 use crate::{IndexDatabase, IndexError, IndexState};
 
 /// Helper to convert `i64` to `u32` safely.
@@ -47,73 +55,103 @@ fn parse_ref_kind(kind: &str) -> RefKind {
     }
 }
 
-/// Run Pass 3: Resolve all packages in `(dir, name)` order and write derived rows.
-///
-/// # Errors
-///
-/// Returns [`IndexError::StateConflict`] unless the index is in [`IndexState::Building`].
-/// Propagates SQLite errors.
-#[allow(
-    clippy::too_many_lines,
-    clippy::similar_names,
-    clippy::case_sensitive_file_extension_comparisons
-)]
-pub fn resolve_facts(db: &mut IndexDatabase) -> Result<ResolutionStats, IndexError> {
-    let state = db.state()?;
-    if state != IndexState::Building {
-        return Err(IndexError::StateConflict {
-            found: state,
-            expected: "building",
-        });
-    }
+/// The shared Pass-3 machinery: the exported index plus resolver, and the
+/// per-package derived-row writer. Derived rows are a pure projection of
+/// facts; this engine is the single definition of that projection, used by
+/// the cold build, the incremental derived phase, and torn-update repair.
+pub(crate) struct DeriveEngine {
+    exported: ExportedIndex,
+    resolver: GoResolver,
+}
 
-    let db_path = db.path.clone();
-    let mut exported_index = build_exported_index(&db.conn, &db_path)?;
+impl DeriveEngine {
+    /// Build the engine from the database's current facts (Pass 2 + resolver
+    /// assembly). Read-only against the database.
+    ///
+    /// # Errors
+    ///
+    /// Propagates SQLite query failures.
+    pub(crate) fn build(conn: &Connection, db_path: &Path) -> Result<Self, IndexError> {
+        let mut exported = build_exported_index(conn, db_path)?;
 
-    let mut resolver = GoResolver::new_empty(
-        exported_index
-            .modules
-            .iter()
-            .map(|m| ModuleInfo::new(m.dir.clone(), m.path.clone()))
-            .collect(),
-        exported_index.package_dirs.clone(),
-        exported_index.has_vendor,
-    );
-
-    for ((dir, name), pkg) in &mut exported_index.packages {
-        let files: Vec<FilePath> = pkg.files.iter().map(|(_, path)| path.clone()).collect();
-        let mut exported: BTreeMap<String, Vec<DefLoc>> = BTreeMap::new();
-        let raw_exported = std::mem::take(&mut pkg.exported);
-        for (sym_name, syms) in raw_exported {
-            let locs = syms
-                .into_iter()
-                .map(|s| DefLoc {
-                    file: s.file_path,
-                    qual_name: s.qual_name,
-                    kind: s.kind,
-                })
-                .collect();
-            exported.insert(sym_name, locs);
-        }
-        resolver.add_package(
-            (dir.clone(), name.clone()),
-            GoPackage {
-                files,
-                defs: BTreeMap::new(),
-                exported,
-                methods: BTreeMap::new(),
-            },
+        let mut resolver = GoResolver::new_empty(
+            exported
+                .modules
+                .iter()
+                .map(|m| ModuleInfo::new(m.dir.clone(), m.path.clone()))
+                .collect(),
+            exported.package_dirs.clone(),
+            exported.has_vendor,
         );
-    }
 
-    let mut stats = ResolutionStats::default();
-
-    // Resolve package by package in sorted order
-    for ((dir, name), pkg_exported) in &exported_index.packages {
-        if pkg_exported.files.is_empty() {
-            continue;
+        for ((dir, name), pkg) in &mut exported.packages {
+            let files: Vec<FilePath> = pkg.files.iter().map(|(_, path)| path.clone()).collect();
+            let mut package_exported: BTreeMap<String, Vec<DefLoc>> = BTreeMap::new();
+            let raw_exported = std::mem::take(&mut pkg.exported);
+            for (sym_name, syms) in raw_exported {
+                let locs = syms
+                    .into_iter()
+                    .map(|s| DefLoc {
+                        file: s.file_path,
+                        qual_name: s.qual_name,
+                        kind: s.kind,
+                    })
+                    .collect();
+                package_exported.insert(sym_name, locs);
+            }
+            resolver.add_package(
+                (dir.clone(), name.clone()),
+                GoPackage {
+                    files,
+                    defs: BTreeMap::new(),
+                    exported: package_exported,
+                    methods: BTreeMap::new(),
+                },
+            );
         }
 
+        Ok(Self { exported, resolver })
+    }
+
+    /// Every package identity in sorted `(dir, name)` order — the canonical
+    /// deterministic resolution order.
+    pub(crate) fn package_keys(&self) -> Vec<(String, String)> {
+        self.exported.packages.keys().cloned().collect()
+    }
+
+    /// The `snapshot_id` of the facts this engine was built from.
+    pub(crate) fn snapshot_id(&self) -> &str {
+        &self.exported.snapshot_id
+    }
+
+    /// Resolve one package and rewrite its derived rows from its current
+    /// facts, pre-clearing every derived row about to be rewritten so a
+    /// re-run after an interrupted one converges to the fresh-build rows.
+    /// Returns `false` when the package is absent or fileless.
+    ///
+    /// # Errors
+    ///
+    /// Propagates SQLite failures; [`IndexError::Locked`] on writer contention.
+    #[allow(
+        clippy::too_many_lines,
+        clippy::similar_names,
+        clippy::case_sensitive_file_extension_comparisons
+    )]
+    pub(crate) fn resolve_package(
+        &mut self,
+        db: &mut IndexDatabase,
+        key: &(String, String),
+        stats: &mut ResolutionStats,
+    ) -> Result<bool, IndexError> {
+        let Self { exported, resolver } = self;
+        let Some(pkg_exported) = exported.packages.get(key) else {
+            return Ok(false);
+        };
+        if pkg_exported.files.is_empty() {
+            return Ok(false);
+        }
+
+        let db_path = db.path.clone();
         let txn = db
             .conn
             .transaction()
@@ -161,6 +199,26 @@ pub fn resolve_facts(db: &mut IndexDatabase) -> Result<ResolutionStats, IndexErr
                 )
                 .map_err(|e| IndexDatabase::classify(&db_path, e))?;
 
+            // Pre-clear the derived rows this pass is about to write: the
+            // upserts below would merge with stale rows instead of replacing
+            // them, so orphans (a target or edge the new facts no longer
+            // produce) would survive a re-run.
+            for &(file_id, _) in &pkg_exported.files {
+                txn.execute(
+                    "DELETE FROM bindings WHERE ref_id IN (SELECT id FROM refs WHERE file_id = ?1)",
+                    params![file_id],
+                )
+                .map_err(|e| IndexDatabase::classify(&db_path, e))?;
+                txn.execute(
+                    "DELETE FROM binding_targets WHERE ref_id IN \
+                     (SELECT id FROM refs WHERE file_id = ?1)",
+                    params![file_id],
+                )
+                .map_err(|e| IndexDatabase::classify(&db_path, e))?;
+                txn.execute("DELETE FROM edges WHERE src = ?1", params![file_id])
+                    .map_err(|e| IndexDatabase::classify(&db_path, e))?;
+            }
+
             // 1. Load package-local definitions and methods
             let mut defs: BTreeMap<String, Vec<DefLoc>> = BTreeMap::new();
             let mut methods: BTreeMap<String, Vec<DefLoc>> = BTreeMap::new();
@@ -195,7 +253,7 @@ pub fn resolve_facts(db: &mut IndexDatabase) -> Result<ResolutionStats, IndexErr
                 }
             }
 
-            resolver.set_package_defs(&(dir.clone(), name.clone()), defs, methods);
+            resolver.set_package_defs(key, defs, methods);
 
             // 2. Resolve each file in the package
             for &(file_id, ref file_path) in &pkg_exported.files {
@@ -295,14 +353,14 @@ pub fn resolve_facts(db: &mut IndexDatabase) -> Result<ResolutionStats, IndexErr
                 }
 
                 let extracted = cs_extract::ExtractedFile {
-                    package_name: Some(name.clone()),
+                    package_name: Some(key.1.clone()),
                     status: ParseStatus::Ok,
                     defs: Vec::new(),
                     refs,
                     imports,
                 };
 
-                let outcome = resolver.resolve_file_outcome(file_path, &extracted, &mut stats);
+                let outcome = resolver.resolve_file_outcome(file_path, &extracted, stats);
 
                 // Write derived imports
                 for (i, (_imp, resolution)) in outcome.resolution.imports.iter().enumerate() {
@@ -342,7 +400,7 @@ pub fn resolve_facts(db: &mut IndexDatabase) -> Result<ResolutionStats, IndexErr
                         .map_err(|e| IndexDatabase::classify(&db_path, e))?;
 
                     for target in &binding.targets {
-                        if let Some(&tgt_file_id) = exported_index.file_by_path.get(&target.file) {
+                        if let Some(&tgt_file_id) = exported.file_by_path.get(&target.file) {
                             stmt_insert_binding_target
                                 .execute(params![
                                     ref_id,
@@ -357,7 +415,7 @@ pub fn resolve_facts(db: &mut IndexDatabase) -> Result<ResolutionStats, IndexErr
 
                 // Write edges: import_out
                 for dst_path in outcome.import_targets {
-                    if let Some(&dst_id) = exported_index.file_by_path.get(&dst_path) {
+                    if let Some(&dst_id) = exported.file_by_path.get(&dst_path) {
                         stmt_insert_edge
                             .execute(params![file_id, dst_id, "import_out", W_IMPORT_OUT])
                             .map_err(|e| IndexDatabase::classify(&db_path, e))?;
@@ -366,7 +424,7 @@ pub fn resolve_facts(db: &mut IndexDatabase) -> Result<ResolutionStats, IndexErr
 
                 // Write edges: test_affinity (bidirectional)
                 for dst_path in outcome.affinity_targets {
-                    if let Some(&dst_id) = exported_index.file_by_path.get(&dst_path) {
+                    if let Some(&dst_id) = exported.file_by_path.get(&dst_path) {
                         stmt_insert_edge
                             .execute(params![file_id, dst_id, "test_affinity", W_TEST_AFFINITY])
                             .map_err(|e| IndexDatabase::classify(&db_path, e))?;
@@ -382,7 +440,7 @@ pub fn resolve_facts(db: &mut IndexDatabase) -> Result<ResolutionStats, IndexErr
                     *ref_counts.entry(dst_path.as_str()).or_default() += 1;
                 }
                 for (dst_path, count) in ref_counts {
-                    if let Some(&dst_id) = exported_index.file_by_path.get(dst_path) {
+                    if let Some(&dst_id) = exported.file_by_path.get(dst_path) {
                         let weight = ref_def_weight(count);
                         stmt_insert_edge
                             .execute(params![file_id, dst_id, "ref_def", weight])
@@ -396,11 +454,38 @@ pub fn resolve_facts(db: &mut IndexDatabase) -> Result<ResolutionStats, IndexErr
             .map_err(|e| IndexDatabase::classify(&db_path, e))?;
 
         // 3. Clear package definitions from resolver to keep memory O(1 package)
-        resolver.clear_package_defs(&(dir.clone(), name.clone()));
+        resolver.clear_package_defs(key);
+        Ok(true)
+    }
+}
+
+/// Run Pass 3: Resolve all packages in `(dir, name)` order and write derived rows.
+///
+/// # Errors
+///
+/// Returns [`IndexError::StateConflict`] unless the index is in [`IndexState::Building`].
+/// Propagates SQLite errors.
+pub fn resolve_facts(db: &mut IndexDatabase) -> Result<ResolutionStats, IndexError> {
+    let lifecycle = db.state()?;
+    if lifecycle != IndexState::Building {
+        return Err(IndexError::StateConflict {
+            found: lifecycle,
+            expected: "building",
+        });
+    }
+
+    let db_path = db.path.clone();
+    let mut engine = DeriveEngine::build(&db.conn, &db_path)?;
+
+    let mut stats = ResolutionStats::default();
+    let keys = engine.package_keys();
+    for key in &keys {
+        engine.resolve_package(db, key, &mut stats)?;
     }
 
     // Now finalize: mark index ready and write snapshot_id
-    db.mark_ready(&exported_index.snapshot_id)?;
+    let snapshot_id = engine.snapshot_id().to_owned();
+    db.mark_ready(&snapshot_id)?;
 
     Ok(stats)
 }
@@ -409,12 +494,90 @@ pub fn resolve_facts(db: &mut IndexDatabase) -> Result<ResolutionStats, IndexErr
 mod tests {
     use super::*;
     use crate::facts::ingest_facts;
+    use crate::incremental::derived_projection;
     use crate::IndexDatabase;
     use cs_resolve::{LanguageResolver, ResolveSnapshot};
     use cs_scanner::{scan, ScanConfig};
     use std::fs;
     use std::path::Path;
     use tempfile::tempdir;
+
+    fn write_file(root: &Path, rel: &str, content: &[u8]) {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, content).unwrap();
+    }
+
+    /// `resolve_facts` only runs in Building; a re-resolve of an already-built
+    /// index re-enters that state directly (the guarded flip back to Ready
+    /// lives in `mark_ready`).
+    fn flip_to_building(db: &mut IndexDatabase) {
+        db.connection_mut()
+            .execute_batch("UPDATE meta SET value = 'building' WHERE key = 'index_state'")
+            .expect("flip to building");
+    }
+
+    #[test]
+    fn resolve_facts_rerun_rewrites_derived_rows_without_duplicates_or_orphans() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        write_file(root, "go.mod", b"module example.com/test\n");
+        write_file(root, "auth/a.go", b"package auth\nfunc Login() {}\n");
+        write_file(
+            root,
+            "web/w.go",
+            b"package web\nimport \"example.com/test/auth\"\nfunc Handler() { auth.Login() }\n",
+        );
+
+        let files = scan(root, &ScanConfig::default()).unwrap();
+        let db_path = tmp.path().join("index.db");
+        let mut db = IndexDatabase::open_or_create(&db_path).unwrap();
+        ingest_facts(&mut db, root, &files, 100).unwrap();
+        resolve_facts(&mut db).unwrap();
+        let first_pass = derived_projection(&db);
+        assert!(
+            first_pass.iter().any(|r| r.starts_with("target")),
+            "fixture must bind web's Login ref into auth/a.go"
+        );
+
+        // A plain re-run over already-resolved facts (a resumed build after
+        // a crash): identical rows, no duplicates.
+        flip_to_building(&mut db);
+        resolve_facts(&mut db).unwrap();
+        assert_eq!(
+            derived_projection(&db),
+            first_pass,
+            "re-resolve must be a no-op on already-correct rows"
+        );
+
+        // Poison the derived state the way a torn write leaves it: a stale
+        // binding_target and a stale edge the current facts no longer
+        // produce, plus a lost target row. Re-running must converge to
+        // exactly the fresh rows — no duplicates, no orphans.
+        db.connection_mut()
+            .execute_batch(
+                "INSERT INTO binding_targets (ref_id, file_id, qual_name, kind) \
+                 SELECT r.id, f2.id, 'Ghost', 'function' FROM refs r \
+                 JOIN files f1 ON f1.id = r.file_id \
+                 JOIN files f2 ON f2.path = 'auth/a.go' \
+                 WHERE f1.path = 'web/w.go'; \
+                 DELETE FROM binding_targets WHERE qual_name = 'Login'; \
+                 INSERT INTO edges (src, dst, kind, weight) \
+                 SELECT f1.id, f2.id, 'stale_kind', 1.0 FROM files f1, files f2 \
+                 WHERE f1.path = 'web/w.go' AND f2.path = 'auth/a.go';",
+            )
+            .unwrap();
+
+        flip_to_building(&mut db);
+        resolve_facts(&mut db).unwrap();
+        assert_eq!(
+            derived_projection(&db),
+            first_pass,
+            "re-resolve must clear stale rows and restore missing ones"
+        );
+    }
 
     #[test]
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
@@ -510,5 +673,46 @@ mod tests {
             )
             .unwrap();
         assert_eq!(unclassified_imports, 0, "all imports must be classified");
+    }
+
+    #[test]
+    fn root_file_import_into_submodule_is_cross_module() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        // No root go.mod: the only module lives in sub/.
+        write_file(root, "sub/go.mod", b"module example.com/sub\n");
+        write_file(root, "sub/util/util.go", b"package util\nfunc U() {}\n");
+        write_file(
+            root,
+            "root.go",
+            b"package main\nimport \"example.com/sub/util\"\nfunc main() { util.U() }\n",
+        );
+
+        let files = scan(root, &ScanConfig::default()).unwrap();
+        let db_path = tmp.path().join("index.db");
+        let mut db = IndexDatabase::open_or_create(&db_path).unwrap();
+        ingest_facts(&mut db, root, &files, 100).unwrap();
+        resolve_facts(&mut db).unwrap();
+
+        // The root file is outside the sub module, so its import into that
+        // module's tree is cross-module — external, never resolved into it.
+        let (resolved_dir, reason): (Option<String>, Option<String>) = db
+            .connection()
+            .query_row(
+                "SELECT i.resolved_dir, i.unresolved_reason FROM imports i \
+                 JOIN files f ON f.id = i.file_id WHERE f.path = 'root.go'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved_dir, None,
+            "a file outside the sub module must not resolve imports into it"
+        );
+        assert_eq!(
+            reason.as_deref(),
+            Some("external"),
+            "cross-module import must be classified external"
+        );
     }
 }

@@ -421,18 +421,19 @@ fn run_index(dir: Option<&Path>, rebuild: bool, _prune: bool, common: &CommonArg
             stats.packages_resolved
         );
     } else {
-        if matches!(db.state(), Ok(cs_index::IndexState::Building)) {
-            db.doctor_repair(cs_index::RepairPolicy::ResetToEmpty)
+        // A build that never reached Ready resumes instead of restarting
+        // (ADR-021 D3): the fact pass skips files whose stored hash matches,
+        // and the resolve pass is idempotent, so completed batches survive.
+        // `--rebuild` is the explicit way back to an empty index.
+        let resuming = matches!(db.state(), Ok(cs_index::IndexState::Building));
+        if !resuming {
+            db.begin_build(cs_index::DEFAULT_CONFIG_FINGERPRINT)
                 .map_err(|e| CliError::IndexFailure {
-                    detail: format!("resetting interrupted build failed: {e}"),
+                    detail: format!("begin build failed: {e}"),
                 })?;
         }
 
         let build_start = std::time::Instant::now();
-        db.begin_build(cs_index::DEFAULT_CONFIG_FINGERPRINT)
-            .map_err(|e| CliError::IndexFailure {
-                detail: format!("begin build failed: {e}"),
-            })?;
 
         let ingest_stats =
             db.ingest_facts(&root, &scanned)
@@ -452,11 +453,25 @@ fn run_index(dir: Option<&Path>, rebuild: bool, _prune: bool, common: &CommonArg
             &snapshot_id
         };
 
+        let resume_note = if resuming {
+            format!(
+                ", {} unchanged from the interrupted build",
+                ingest_stats.files_skipped_already_present
+            )
+        } else {
+            String::new()
+        };
         eprintln!(
-            "cold index completed in {:?}: {} files scanned, {} inserted, {} symbols, {} refs, {} imports",
+            "{} index completed in {:?}: {} files scanned, {} inserted{}, {} symbols, {} refs, {} imports",
+            if resuming {
+                "resumed"
+            } else {
+                "cold"
+            },
             build_dur,
             ingest_stats.files_scanned,
             ingest_stats.files_inserted,
+            resume_note,
             ingest_stats.symbols_inserted,
             ingest_stats.refs_inserted,
             ingest_stats.imports_inserted
@@ -631,6 +646,91 @@ mod tests {
         };
         let err = run_slice(&args, dir.path()).expect_err("must fail while skeleton");
         assert_eq!(err.exit_code(), ExitCode::Internal);
+    }
+
+    #[test]
+    fn index_command_resumes_a_building_index_instead_of_resetting() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            repo.path().join("go.mod"),
+            b"module example.com/test\n\ngo 1.22\n",
+        )
+        .expect("write go.mod");
+        std::fs::write(
+            repo.path().join("a.go"),
+            b"package test\n\nfunc Alpha() {}\n",
+        )
+        .expect("write a.go");
+        std::fs::write(
+            repo.path().join("b.go"),
+            b"package test\n\nfunc Beta() {}\n",
+        )
+        .expect("write b.go");
+
+        let scanned =
+            cs_scanner::scan(repo.path(), &cs_scanner::ScanConfig::default()).expect("scan");
+
+        // An interrupted build: a.go's facts are already committed, stamped
+        // with a sentinel mtime no fresh scan of this tree can produce (the
+        // file is never modified again, and filesystem mtimes are epoch-
+        // anchored, i.e. ~1.7e9).
+        let mut partial = scanned
+            .iter()
+            .find(|f| f.path == "a.go")
+            .expect("a.go scanned")
+            .clone();
+        partial.mtime = 100;
+        {
+            let db_path = repo.path().join(".contextslice").join("index.db");
+            let mut db = cs_index::IndexDatabase::open_or_create(&db_path).expect("open");
+            db.begin_build(cs_index::DEFAULT_CONFIG_FINGERPRINT)
+                .expect("begin");
+            db.ingest_facts(repo.path(), std::slice::from_ref(&partial))
+                .expect("partial ingest");
+            assert_eq!(db.state().expect("state"), cs_index::IndexState::Building);
+        }
+
+        // b.go changes after the interruption.
+        std::fs::write(
+            repo.path().join("b.go"),
+            b"package test\n\nfunc Beta() {}\n\nfunc Delta() {}\n",
+        )
+        .expect("rewrite b.go");
+
+        let common = CommonArgs {
+            no_git: false,
+            index: None,
+        };
+        run_index(Some(repo.path()), false, false, &common).expect("index command resumes");
+
+        let db_path = repo.path().join(".contextslice").join("index.db");
+        let db = cs_index::IndexDatabase::open_or_create(&db_path).expect("reopen");
+        assert_eq!(db.state().expect("state"), cs_index::IndexState::Ready);
+
+        let a_mtime: i64 = db
+            .connection()
+            .query_row("SELECT mtime FROM files WHERE path = 'a.go'", [], |r| {
+                r.get(0)
+            })
+            .expect("a.go row");
+        assert_eq!(
+            a_mtime, 100,
+            "a completed batch must be resumed in place — a reset-to-empty rebuild \
+             would have re-ingested a.go with its on-disk mtime"
+        );
+
+        let delta: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM symbols WHERE name = 'Delta'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("delta lookup");
+        assert_eq!(
+            delta, 1,
+            "the post-interruption edit must be ingested by the resume"
+        );
     }
 
     #[test]
