@@ -1,4 +1,8 @@
-# ContextSlice
+# ContextSlice 🍰
+
+<p align="center">
+  <img src="docs/assets/logo.svg" width="128" alt="ContextSlice logo — stacked slices, one seed" />
+</p>
 
 <p align="center">
   <a href="https://github.com/qwerpik/contextslice/actions/workflows/ci.yml"><img src="https://github.com/qwerpik/contextslice/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
@@ -9,25 +13,26 @@
 </p>
 
 <p align="center">
-  <em>Deterministic, token-budgeted context selection for coding agents.</em>
+  <em>Deterministic, token-budgeted context selection for coding agents.</em><br />
+  One slice per task. Zero waste. 🍰
 </p>
 
 <p align="center">
-  tree-sitter parsing &nbsp;•&nbsp; SQLite index &nbsp;•&nbsp; bounded graph walk &nbsp;•&nbsp; no embeddings, no LLM, no network
+  🌳 tree-sitter &nbsp;•&nbsp; 🗄️ SQLite index &nbsp;•&nbsp; 🧮 global budget fit &nbsp;•&nbsp; 🚫 no embeddings, no LLM, no network
 </p>
 
 <p align="center">
-  <a href="#why-this-is-not-another-repo-packer">Why</a> •
-  <a href="#project-status">Status</a> •
-  <a href="#architecture-in-one-screen">Architecture</a> •
-  <a href="#building">Building</a> •
-  <a href="#design-commitments">Design</a> •
-  <a href="docs/MASTER_PLAN.md">Master plan</a> •
-  <a href="#contributing">Contributing</a>
+  <a href="#why-this-is-not-another-repo-packer">🎯 Why</a> •
+  <a href="#project-status">📊 Status</a> •
+  <a href="#architecture-in-one-screen">🏛️ Architecture</a> •
+  <a href="#building">🔨 Building</a> •
+  <a href="#design-commitments">💎 Design</a> •
+  <a href="docs/MASTER_PLAN.md">📌 Master plan</a> •
+  <a href="#contributing">🤝 Contributing</a>
 </p>
 
 > [!IMPORTANT]
-> **Status: pre-alpha, bootstrap milestone.** The workspace, CI, and quality gates exist
+> **🚧 Status: pre-alpha, bootstrap milestone.** The workspace, CI, and quality gates exist
 > and are green. The selection engine is not implemented yet — see
 > [Project status](#project-status). Nothing here is usable as a tool today.
 
@@ -49,7 +54,9 @@ no LLM calls, no network, no API keys.
 
 ---
 
-## Why this is not another repo packer
+## 🎯 Why this is not another repo packer
+
+<a id="why-this-is-not-another-repo-packer"></a>
 
 Packing a whole repo is solved — Repomix, gitingest, code2prompt do it well, and ContextSlice
 loses that beauty contest on purpose (MASTER_PLAN.md §3.6). The unsolved question is the one
@@ -57,7 +64,7 @@ that costs agents turns and tokens:
 
 > For *this task*, which files, at what level of detail, within *N* tokens?
 
-| Packers | ContextSlice |
+| Packers 📦 | ContextSlice 🍰 |
 |---|---|
 | Dump everything, hand-set includes | 🎯 Task text seeds selection, repo graph refines it |
 | Budget as CI guardrail (oversized output still produced) | 📏 Demotes detail until the artifact genuinely fits — never exceeded, property-tested |
@@ -67,13 +74,13 @@ Two of the three rows describe how the category already works — stated that wa
 The differentiation is narrower than a feature list: the *mechanism* in row three, verified
 per-competitor in ADR-015 as "we could not find", never "it does not exist".
 
-Plus a **published, reproducible benchmark** (intrinsic recall/precision per token, extrinsic
+Plus a **published, reproducible benchmark** 📊 (intrinsic recall/precision per token, extrinsic
 task success per token and cost) with harness, corpus manifests and per-task logs. No "first"
 claim — RepoGraph, Aider and ContextBench are counterexamples. A checkability claim: no public
 claim ships without a run, and the negative-results section is mandatory.
 
 > [!CAUTION]
-> **arXiv 2602.11988 takes aim at this premise**: repo context files "do not generally improve
+> **📉 arXiv 2602.11988 takes aim at this premise**: repo context files "do not generally improve
 > task success rates, while increasing inference cost by over 20%". Recorded as risk #4 with a
 > stop/go consequence — Phase 3's extrinsic benchmark is the go/no-go. If task-conditioned
 > selection shows no success gain at equal tokens, the project pivots. The study tests static
@@ -81,7 +88,7 @@ claim ships without a run, and the negative-results section is mandatory.
 > rebuttal to cite.
 
 <details>
-<summary>Honesty notes (retracted claims, verification)</summary>
+<summary>🔍 Honesty notes (retracted claims, verification)</summary>
 
 - Task-conditioned selection is table stakes (Aider chat keywords, Graft `graft ask`
   deterministic ranking, `graft skeleton` signatures output). Not the differentiator.
@@ -96,11 +103,11 @@ claim ships without a run, and the negative-results section is mandatory.
 
 ---
 
-## Project status
+## 📊 Project status
 
 <a id="project-status"></a>
 
-This repository is at the **bootstrap milestone** (MASTER_PLAN.md §15 step 1). Being
+This repository is at the **bootstrap milestone** 🌱 (MASTER_PLAN.md §15 step 1). Being
 explicit about what exists matters more than looking finished:
 
 | Area | State |
@@ -116,32 +123,32 @@ explicit about what exists matters more than looking finished:
 | 📊 Benchmark harness and published report | ⬜ not implemented |
 
 > [!NOTE]
-> The CLI is honest about this: a command whose stages do not exist yet **fails** with the
+> **💡 The CLI is honest about this:** a command whose stages do not exist yet **fails** with the
 > roadmap step that will implement it, rather than printing an empty or partial slice. A
 > caller can branch on the exit code; a caller cannot detect a plausible-looking wrong
 > slice.
 
 ---
 
-## Architecture in one screen
+## 🏛️ Architecture in one screen
 
 <a id="architecture-in-one-screen"></a>
 
 ```mermaid
 flowchart LR
-    Repo["Repository"] --> SC["cs-scanner<br/>walk · ignore · lang map · blake3"]
-    SC --> EX["cs-extract<br/>tree-sitter · .scm queries"]
-    EX --> RE["cs-resolve<br/>import→file resolution"]
-    RE --> IDX["cs-index (SQLite)<br/>files · symbols · refs · FTS5"]
-    Task["task + flags"] --> SE["cs-select<br/>seed · propagate · budget fit"]
+    Repo["📁 Repository"] --> SC["🔍 cs-scanner<br/>walk · ignore · lang map · blake3"]
+    SC --> EX["🌳 cs-extract<br/>tree-sitter · .scm queries"]
+    EX --> RE["🧭 cs-resolve<br/>import→file resolution"]
+    RE --> IDX["🗄️ cs-index (SQLite)<br/>files · symbols · refs · FTS5"]
+    Task["🎯 task + flags"] --> SE["🧮 cs-select<br/>seed · propagate · budget fit"]
     IDX --> SE
-    SE --> RN["cs-render<br/>L0–L5 · md/json/xml"]
-    RN --> OUT["stdout pipe → any agent or human"]
-    SE -.-> MCP["cs-mcp<br/>stdio server, same engine"]
+    SE --> RN["🖨️ cs-render<br/>L0–L5 · md/json/xml"]
+    RN --> OUT["📤 stdout pipe → any agent or human"]
+    SE -.-> MCP["🔌 cs-mcp<br/>stdio server, same engine"]
 ```
 
 <details>
-<summary>Text fallback (screen readers / offline)</summary>
+<summary>📝 Text fallback (screen readers / offline)</summary>
 
 ```text
 Repository ─► cs-scanner ─► cs-extract ─► cs-resolve ─► cs-index (SQLite)
@@ -160,7 +167,7 @@ Repository ─► cs-scanner ─► cs-extract ─► cs-resolve ─► cs-index
 
 </details>
 
-The full design is in [`docs/`](docs/):
+The full design is in [`docs/`](docs/) 📚:
 
 | Document | Contents |
 |---|---|
@@ -172,26 +179,26 @@ The full design is in [`docs/`](docs/):
 | 🌐 [LANGUAGES.md](docs/LANGUAGES.md) | language tiers, the adapter contract, per-language specs |
 | 🗂️ [docs/adr/](docs/adr/) | decision records, including what verification rejected |
 
-### Decisions already made and recorded
+### 🧠 Decisions already made and recorded
 
 Sixteen ADRs exist before the first feature, because several were forced by facts that
 contradicted the original plan. The interesting ones:
 
-- **ADR-012 — we write our own tree-sitter queries.** Aider's tag queries were the
+- **ADR-012 🌳 — we write our own tree-sitter queries.** Aider's tag queries were the
   obvious shortcut. They depend on `#strip!` and `#set-adjacent!`, which the core Rust
   binding **silently ignores** — the query compiles, captures come back unprocessed, and
   doc comments retain their `//` prefixes with no error anywhere. Measured, not assumed.
-- **ADR-013 — MCP is deferred, and the protocol changed underneath us.** The current MCP
+- **ADR-013 🔌 — MCP is deferred, and the protocol changed underneath us.** The current MCP
   revision (`2026-07-28`) *removed* the `initialize` handshake that our architecture
   document specified. `rmcp` also cannot serve stdio without an async runtime. The MCP
   adapter is a Phase 2 concern; the record explains what was verified and the criteria
   that will settle the transport choice.
-- **ADR-008 — the TypeScript and TSX grammars are not interchangeable, and neither is a
+- **ADR-008 🌐 — the TypeScript and TSX grammars are not interchangeable, and neither is a
   superset.** `LANGUAGE_TYPESCRIPT` cannot parse JSX; `LANGUAGE_TSX` cannot parse
   `<string>value` assertions. The grammar is chosen per extension, and a test pins it.
-- **ADR-014 — `tiktoken-rs` with embedded tables**, so budget estimation and final
+- **ADR-014 🔢 — `tiktoken-rs` with embedded tables**, so budget estimation and final
   measurement share one code path and stay offline.
-- **ADR-015 — three competitive claims in our own founding documents were wrong.** They
+- **ADR-015 🔍 — three competitive claims in our own founding documents were wrong.** They
   were checked against competitors' source rather than their documentation, and two of
   them disagreed: Aider's repo map is 1024–4096 tokens (not "~1k") with a *soft, ±15%*
   budget and granularity chosen by chat membership, and Graft already ships deterministic
@@ -204,11 +211,11 @@ contradicted the original plan. The interesting ones:
 
 ---
 
-## Building
+## 🔨 Building
 
 <a id="building"></a>
 
-Requires Rust **1.90** or newer. The floor comes from `tree-sitter` 0.27, and CI
+Requires Rust **1.90** or newer 🦀. The floor comes from `tree-sitter` 0.27, and CI
 verifies it on the declared toolchain rather than trusting the declaration (ADR-001).
 
 ```console
@@ -227,28 +234,28 @@ $ make check
 
 ---
 
-## Design commitments
+## 💎 Design commitments
 
 <a id="design-commitments"></a>
 
 These are not aspirations; each is enforced somewhere:
 
-- **Determinism.** Same index snapshot + task + flags ⇒ byte-identical output
+- **🎯 Determinism.** Same index snapshot + task + flags ⇒ byte-identical output
   (ALGORITHM.md §12). Parallel work is order-normalized before it can affect output. An
   index snapshot id is frozen into every slice header.
-- **Budget integrity.** The rendered artifact never exceeds the budget, property-tested
+- **📏 Budget integrity.** The rendered artifact never exceeds the budget, property-tested
   against adversarial inputs.
-- **Zero network.** The core never opens a socket, and CI fails the build if a networking
+- **🚫 Zero network.** The core never opens a socket, and CI fails the build if a networking
   or async-runtime crate enters the dependency tree.
-- **Honest approximation.** Reference edges are approximate by construction; unresolved
+- **🔍 Honest approximation.** Reference edges are approximate by construction; unresolved
   imports are counted and published as a resolution rate rather than hidden.
-- **No source text stored.** The index holds spans and signatures, never file contents.
-- **stdout is sacred.** Only the artifact goes to stdout; progress and diagnostics go to
+- **🙈 No source text stored.** The index holds spans and signatures, never file contents.
+- **📤 stdout is sacred.** Only the artifact goes to stdout; progress and diagnostics go to
   stderr, so piping always works.
 
 ---
 
-## Contributing
+## 🤝 Contributing
 
 <a id="contributing"></a>
 
@@ -259,6 +266,6 @@ verifiable by golden fixtures. See [CONTRIBUTING.md](CONTRIBUTING.md) and
 Algorithm changes require a benchmark delta attached to the PR. Constants may not be
 tuned by anecdote (ALGORITHM.md §13).
 
-## License
+## 📜 License
 
 Apache-2.0. See [LICENSE](LICENSE) and [ADR-007](docs/adr/ADR-007-apache-2-license.md).

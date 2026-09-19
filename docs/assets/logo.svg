@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="ContextSlice logo">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#89b4fa"/>
+      <stop offset="1" stop-color="#cba6f7"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#bg)"/>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="none" stroke="#ffffff" stroke-opacity="0.35" stroke-width="3"/>
+  <rect x="32" y="80" width="64" height="12" rx="6" fill="#ffffff" opacity="0.35"/>
+  <rect x="32" y="60" width="64" height="12" rx="6" fill="#ffffff" opacity="0.6"/>
+  <rect x="32" y="40" width="64" height="12" rx="6" fill="#a6e3a1"/>
+  <circle cx="90" cy="34" r="11" fill="#fab387"/>
+  <circle cx="90" cy="34" r="11" fill="none" stroke="#1e1e2e" stroke-opacity="0.25" stroke-width="2"/>
+  <circle cx="90" cy="34" r="4" fill="#1e1e2e" opacity="0.55"/>
+</svg>
