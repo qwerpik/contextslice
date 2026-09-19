@@ -1,7 +1,7 @@
 # ContextSlice 🍰
 
 <p align="center">
-  <img src="docs/assets/logo.svg" width="128" alt="ContextSlice logo — stacked slices, one seed" />
+  <img src="docs/assets/logo.svg" width="128" alt="ContextSlice logo — stacked slices" />
 </p>
 
 <p align="center">

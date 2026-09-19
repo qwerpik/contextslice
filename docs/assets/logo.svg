@@ -10,7 +10,4 @@
   <rect x="32" y="80" width="64" height="12" rx="6" fill="#ffffff" opacity="0.35"/>
   <rect x="32" y="60" width="64" height="12" rx="6" fill="#ffffff" opacity="0.6"/>
   <rect x="32" y="40" width="64" height="12" rx="6" fill="#a6e3a1"/>
-  <circle cx="90" cy="34" r="11" fill="#fab387"/>
-  <circle cx="90" cy="34" r="11" fill="none" stroke="#1e1e2e" stroke-opacity="0.25" stroke-width="2"/>
-  <circle cx="90" cy="34" r="4" fill="#1e1e2e" opacity="0.55"/>
 </svg>
