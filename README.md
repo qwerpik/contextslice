@@ -1,6 +1,35 @@
 # ContextSlice
 
-**Deterministic, token-budgeted context selection for coding agents.**
+<p align="center">
+  <a href="https://github.com/qwerpik/contextslice/actions/workflows/ci.yml"><img src="https://github.com/qwerpik/contextslice/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue?style=flat-square" alt="License: Apache-2.0" /></a>
+  <img src="https://img.shields.io/badge/Rust-1.90-orange?style=flat-square&logo=rust&logoColor=white" alt="Rust 1.90+" />
+  <img src="https://img.shields.io/badge/version-0.1.0-lightgrey?style=flat-square" alt="Version 0.1.0" />
+  <img src="https://img.shields.io/badge/network-none-a6e3a1?style=flat-square" alt="Zero network" />
+</p>
+
+<p align="center">
+  <em>Deterministic, token-budgeted context selection for coding agents.</em>
+</p>
+
+<p align="center">
+  tree-sitter parsing &nbsp;•&nbsp; SQLite index &nbsp;•&nbsp; bounded graph walk &nbsp;•&nbsp; no embeddings, no LLM, no network
+</p>
+
+<p align="center">
+  <a href="#why-this-is-not-another-repo-packer">Why</a> •
+  <a href="#project-status">Status</a> •
+  <a href="#architecture-in-one-screen">Architecture</a> •
+  <a href="#building">Building</a> •
+  <a href="#design-commitments">Design</a> •
+  <a href="docs/MASTER_PLAN.md">Master plan</a> •
+  <a href="#contributing">Contributing</a>
+</p>
+
+> [!IMPORTANT]
+> **Status: pre-alpha, bootstrap milestone.** The workspace, CI, and quality gates exist
+> and are green. The selection engine is not implemented yet — see
+> [Project status](#project-status). Nothing here is usable as a tool today.
 
 Give it a task and a repository. It decides which files an agent should see, and at what
 level of detail, and emits one token-budgeted artifact: full source where the work is,
@@ -17,10 +46,6 @@ $ contextslice "fix the authentication timeout bug"
 The core is **deterministic and offline**: tree-sitter parsing, a symbol and reference
 index in SQLite, per-language import resolution, and a bounded graph walk. No embeddings,
 no LLM calls, no network, no API keys.
-
-> **Status: pre-alpha, bootstrap milestone.** The workspace, CI, and quality gates exist
-> and are green. The selection engine is not implemented yet — see
-> [Project status](#project-status). Nothing here is usable as a tool today.
 
 ---
 
@@ -106,29 +131,50 @@ adapter depth, and accumulated evaluation data.
 
 ## Project status
 
+<a id="project-status"></a>
+
 This repository is at the **bootstrap milestone** (MASTER_PLAN.md §15 step 1). Being
 explicit about what exists matters more than looking finished:
 
 | Area | State |
 |---|---|
-| Cargo workspace, 10 crates (ARCHITECTURE.md §3) | ✅ exists, compiles |
-| `cs-scanner` — traversal, language detection, blake3 hashing | ✅ implemented and tested |
-| `cs-extract` — grammar loading, parse status, fact types | 🟡 grammar layer done and ABI-tested; `.scm` query extraction is step 3 |
-| `cs-resolve` — weight model, resolution types, `LanguageAdapter` seam | 🟡 types and seam defined; per-language resolvers are steps 4/10/11 |
-| `cs-index`, `cs-git`, `cs-select`, `cs-render`, `cs-bench`, `cs-mcp` | ⬜ skeleton (types only) |
-| `cs-cli` — command surface, exit codes, stdout/stderr contract | 🟡 contract implemented; commands report their missing stage |
-| CI: fmt, clippy `-D warnings`, tests on 3 OSes, MSRV, docs, licenses, zero-network | ✅ configured |
-| Selection algorithm (ALGORITHM.md) | ⬜ not implemented |
-| Benchmark harness and published report | ⬜ not implemented |
+| 📦 Cargo workspace, 10 crates (ARCHITECTURE.md §3) | ✅ exists, compiles |
+| 🔍 `cs-scanner` — traversal, language detection, blake3 hashing | ✅ implemented and tested |
+| 🌳 `cs-extract` — grammar loading, parse status, fact types | 🟡 grammar layer done and ABI-tested; `.scm` query extraction is step 3 |
+| 🧭 `cs-resolve` — weight model, resolution types, `LanguageAdapter` seam | 🟡 types and seam defined; per-language resolvers are steps 4/10/11 |
+| 🧩 `cs-index`, `cs-git`, `cs-select`, `cs-render`, `cs-bench`, `cs-mcp` | ⬜ skeleton (types only) |
+| ⌨️ `cs-cli` — command surface, exit codes, stdout/stderr contract | 🟡 contract implemented; commands report their missing stage |
+| 🛡️ CI: fmt, clippy `-D warnings`, tests on 3 OSes, MSRV, docs, licenses, zero-network | ✅ configured |
+| 🧮 Selection algorithm (ALGORITHM.md) | ⬜ not implemented |
+| 📊 Benchmark harness and published report | ⬜ not implemented |
 
-The CLI is honest about this: a command whose stages do not exist yet **fails** with the
-roadmap step that will implement it, rather than printing an empty or partial slice. A
-caller can branch on the exit code; a caller cannot detect a plausible-looking wrong
-slice.
+> [!NOTE]
+> The CLI is honest about this: a command whose stages do not exist yet **fails** with the
+> roadmap step that will implement it, rather than printing an empty or partial slice. A
+> caller can branch on the exit code; a caller cannot detect a plausible-looking wrong
+> slice.
 
 ---
 
 ## Architecture in one screen
+
+<a id="architecture-in-one-screen"></a>
+
+```mermaid
+flowchart LR
+    Repo["Repository"] --> SC["cs-scanner<br/>walk · ignore · lang map · blake3"]
+    SC --> EX["cs-extract<br/>tree-sitter · .scm queries"]
+    EX --> RE["cs-resolve<br/>import→file resolution"]
+    RE --> IDX["cs-index (SQLite)<br/>files · symbols · refs · FTS5"]
+    Task["task + flags"] --> SE["cs-select<br/>seed · propagate · budget fit"]
+    IDX --> SE
+    SE --> RN["cs-render<br/>L0–L5 · md/json/xml"]
+    RN --> OUT["stdout pipe → any agent or human"]
+    SE -.-> MCP["cs-mcp<br/>stdio server, same engine"]
+```
+
+<details>
+<summary>Text fallback (screen readers / offline)</summary>
 
 ```text
 Repository ─► cs-scanner ─► cs-extract ─► cs-resolve ─► cs-index (SQLite)
@@ -145,17 +191,19 @@ Repository ─► cs-scanner ─► cs-extract ─► cs-resolve ─► cs-index
                             cs-mcp (stdio MCP server, thin over the same engine)
 ```
 
+</details>
+
 The full design is in [`docs/`](docs/):
 
 | Document | Contents |
 |---|---|
-| [MASTER_PLAN.md](docs/MASTER_PLAN.md) | product, competitive position, MVP, roadmap, quality bar, risks |
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | crates, data model, storage, concurrency, failure modes, packaging |
-| [ALGORITHM.md](docs/ALGORITHM.md) | the selection algorithm: signals, weights, propagation, budget fitting |
-| [BENCHMARK.md](docs/BENCHMARK.md) | evaluation methodology, metrics, baselines, statistical rules, claims policy |
-| [SECURITY.md](docs/SECURITY.md) | threat model, prompt injection, untrusted repos, privacy, supply chain |
-| [LANGUAGES.md](docs/LANGUAGES.md) | language tiers, the adapter contract, per-language specs |
-| [docs/adr/](docs/adr/) | decision records, including what verification rejected |
+| 📌 [MASTER_PLAN.md](docs/MASTER_PLAN.md) | product, competitive position, MVP, roadmap, quality bar, risks |
+| 🏛️ [ARCHITECTURE.md](docs/ARCHITECTURE.md) | crates, data model, storage, concurrency, failure modes, packaging |
+| 🧮 [ALGORITHM.md](docs/ALGORITHM.md) | the selection algorithm: signals, weights, propagation, budget fitting |
+| 📊 [BENCHMARK.md](docs/BENCHMARK.md) | evaluation methodology, metrics, baselines, statistical rules, claims policy |
+| 🛡️ [SECURITY.md](docs/SECURITY.md) | threat model, prompt injection, untrusted repos, privacy, supply chain |
+| 🌐 [LANGUAGES.md](docs/LANGUAGES.md) | language tiers, the adapter contract, per-language specs |
+| 🗂️ [docs/adr/](docs/adr/) | decision records, including what verification rejected |
 
 ### Decisions already made and recorded
 
@@ -191,6 +239,8 @@ contradicted the original plan. The interesting ones:
 
 ## Building
 
+<a id="building"></a>
+
 Requires Rust **1.90** or newer. The floor comes from `tree-sitter` 0.27, and CI
 verifies it on the declared toolchain rather than trusting the declaration (ADR-001).
 
@@ -212,6 +262,8 @@ $ make check
 
 ## Design commitments
 
+<a id="design-commitments"></a>
+
 These are not aspirations; each is enforced somewhere:
 
 - **Determinism.** Same index snapshot + task + flags ⇒ byte-identical output
@@ -230,6 +282,8 @@ These are not aspirations; each is enforced somewhere:
 ---
 
 ## Contributing
+
+<a id="contributing"></a>
 
 Language adapters are the ideal first contribution: self-contained, template-guided, and
 verifiable by golden fixtures. See [CONTRIBUTING.md](CONTRIBUTING.md) and
