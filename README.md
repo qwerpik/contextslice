@@ -5,7 +5,6 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/qwerpik/contextslice/actions/workflows/ci.yml"><img src="https://github.com/qwerpik/contextslice/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue?style=flat-square" alt="License: Apache-2.0" /></a>
   <img src="https://img.shields.io/badge/Rust-1.90-orange?style=flat-square&logo=rust&logoColor=white" alt="Rust 1.90+" />
   <img src="https://img.shields.io/badge/version-0.1.0-lightgrey?style=flat-square" alt="Version 0.1.0" />
