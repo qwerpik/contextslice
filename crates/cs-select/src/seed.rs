@@ -31,6 +31,8 @@ pub enum SeedSignal {
     S1Exact,
     /// S1 case-insensitive match: value 0.7 × weight 3.0.
     S1Folded,
+    /// S4 BM25 match: value `b/(b+3)` with `b = -bm25()`, weight 1.0.
+    S4Bm25,
 }
 
 /// The per-selection FTS5 table over snapshot symbols, plus the signal
@@ -130,6 +132,53 @@ impl SeedIndex {
                 path,
                 score,
                 signal,
+            })
+            .collect()
+    }
+
+    /// S4 seed contributions for parsed task terms (ALGORITHM §5).
+    ///
+    /// Each distinct term runs as an FTS5 query; every matched row scores
+    /// `S4_BM25_WEIGHT × b/(b+S4_BM25_NORM_DIVISOR)` with `b = -bm25(...)`.
+    /// The negation comes first because FTS5 ranks better matches MORE
+    /// negative — consuming `bm25()` unnegated would invert the ranking.
+    /// Rows with `b <= 0.0` contribute nothing and are skipped. Output
+    /// order is the same total (score desc, path asc, symbol asc) sort as
+    /// [`SeedIndex::seed_s1`].
+    #[must_use]
+    pub fn seed_s4(&self, terms: &[ParsedTerm]) -> Vec<SeedScore> {
+        let mut rows: Vec<(f64, String)> = Vec::new();
+        for term in terms {
+            let phrase = format!("\"{}\"", term.lower.replace('"', "\"\""));
+            let mut query = match self.conn.prepare(
+                "SELECT file, -bm25(seed_fts) FROM seed_fts WHERE seed_fts MATCH ?1",
+            ) {
+                Ok(query) => query,
+                Err(_) => continue,
+            };
+            let candidates = query.query_map([phrase], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            });
+            let candidates = match candidates {
+                Ok(candidates) => candidates,
+                Err(_) => continue,
+            };
+            for candidate in candidates.flatten() {
+                let (file, b) = candidate;
+                if b <= 0.0 {
+                    continue;
+                }
+                let value = b / (b + tuning::S4_BM25_NORM_DIVISOR);
+                rows.push((tuning::S4_BM25_WEIGHT * value, file));
+            }
+        }
+        rows.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        rows
+            .into_iter()
+            .map(|(score, path)| SeedScore {
+                path,
+                score,
+                signal: SeedSignal::S4Bm25,
             })
             .collect()
     }
@@ -238,8 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn s1_output_order_is_score_then_path_then_symbol() {
-        use crate::task::parse_task;
+    fn s1_output_order_is_score_then_path_then_symbol() {        use crate::task::parse_task;
         let snapshot = scored_snapshot();
         let index = SeedIndex::build(&snapshot).expect("build");
         // Both symbols fold-match "login": tied 2.1 scores must
@@ -253,5 +301,57 @@ mod tests {
         sorted.sort_unstable();
         assert_eq!(order, sorted, "tied scores break by path asc");
         assert_eq!(index.seed_s1(&task.terms), scores, "same order twice");
+    }
+
+    #[test]
+    fn s4_bm25_sign_convention_is_pinned() {
+        // FTS5 ranks better matches MORE negative. S4 consumes -bm25, so
+        // if SQLite ever flips the sign convention this test — not silent
+        // ranking drift — tells us.
+        let snapshot = scored_snapshot();
+        let index = SeedIndex::build(&snapshot).expect("build");
+        let raw: f64 = index
+            .conn
+            .query_row(
+                "SELECT bm25(seed_fts) FROM seed_fts WHERE seed_fts MATCH '\"login\"'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("bm25 query");
+        assert!(raw < 0.0, "bm25 must be negative for a match, got {raw}");
+    }
+
+    #[test]
+    fn s4_scores_follow_b_over_b_plus_3() {
+        use crate::task::parse_task;
+        use crate::tuning;
+        let snapshot = scored_snapshot();
+        let index = SeedIndex::build(&snapshot).expect("build");
+        let task = parse_task("login");
+        let scores = index.seed_s4(&task.terms);
+        assert_eq!(scores.len(), 2, "both symbols match, got {scores:?}");
+        for score in &scores {
+            assert_eq!(score.signal, SeedSignal::S4Bm25);
+            assert!(
+                score.score > 0.0 && score.score < tuning::S4_BM25_WEIGHT,
+                "value b/(b+3) in (0,1) times weight 1.0, got {}",
+                score.score
+            );
+        }
+        // Recompute from the pinned-negative bm25: score must equal
+        // weight * b/(b+3) exactly (same arithmetic, no hidden terms).
+        let b: f64 = index
+            .conn
+            .query_row(
+                "SELECT -bm25(seed_fts) FROM seed_fts WHERE seed_fts MATCH '\"login\"' LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("bm25 query");
+        let expected = tuning::S4_BM25_WEIGHT * (b / (b + tuning::S4_BM25_NORM_DIVISOR));
+        assert!(
+            scores.iter().any(|s| (s.score - expected).abs() < 1e-12),
+            "a score matches weight*b/(b+3) = {expected}, got {scores:?}"
+        );
     }
 }
