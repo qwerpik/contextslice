@@ -300,7 +300,7 @@ pub fn parse_task(task: &str) -> ParsedTask {
             hints.paths.push(cleaned.to_owned());
             // Path segments are words: `internal` and `session` are terms,
             // code-generic `auth`/`handler` fall out as stopwords.
-            collect_terms(cleaned, &mut lowers, true);
+            collect_terms(cleaned, &mut lowers, &mut flags, true);
         } else if let Some(parts) = qualified_parts(cleaned) {
             hints.symbols.push(cleaned.to_owned());
             for part in &parts {
@@ -312,16 +312,15 @@ pub fn parse_task(task: &str) -> ParsedTask {
             // exact qualified name, so it is signal by construction even
             // when the word itself is stopword-listed. Precision lives in
             // hints, recall in terms. Modifier words stay flags, never
-            // terms — the same rule as plain tokens. Scopes (`Module`,
-            // `pkg`) contribute no terms; the raw-token split below is
-            // skipped for qualified tokens for exactly that reason.
+            // terms — enforced inside `push_identifier_piece`, same rule
+            // as plain tokens. Scopes (`Module`, `pkg`) contribute no
+            // terms; the raw-token split below is skipped for qualified
+            // tokens for exactly that reason.
             if let Some(member) = parts.last() {
-                if !tag_modifier(&member.to_lowercase(), &mut flags) {
-                    push_identifier_piece(member, &mut lowers);
-                }
+                push_identifier_piece(member, &mut lowers, &mut flags);
             }
         } else {
-            collect_terms(cleaned, &mut lowers, false);
+            collect_terms(cleaned, &mut lowers, &mut flags, false);
         }
     }
 
@@ -399,7 +398,12 @@ pub fn split_camel(run: &str) -> Vec<String> {
 /// `rememberme` because `me` is too short, while `auth-timeout` needs no
 /// `authtimeout` since both parts survive. Stopword-dropped parts never
 /// trigger the join — resurrecting filtered words would defeat filtering.
-fn collect_terms(token: &str, lowers: &mut BTreeMap<String, ParsedTerm>, filter_words: bool) {
+fn collect_terms(
+    token: &str,
+    lowers: &mut BTreeMap<String, ParsedTerm>,
+    flags: &mut TaskFlags,
+    filter_words: bool,
+) {
     let runs: Vec<&str> = token.split(|c: char| !c.is_alphanumeric()).collect();
     for run in &runs {
         let pieces = split_camel(run);
@@ -408,7 +412,7 @@ fn collect_terms(token: &str, lowers: &mut BTreeMap<String, ParsedTerm>, filter_
             if whole_word {
                 push_term(piece, piece, lowers);
             } else {
-                push_identifier_piece(piece, lowers);
+                push_identifier_piece(piece, lowers, flags);
             }
         }
     }
@@ -417,7 +421,11 @@ fn collect_terms(token: &str, lowers: &mut BTreeMap<String, ParsedTerm>, filter_
         && runs.len() > 1;
     if joinable && runs.iter().any(|r| shape_dropped(r)) {
         let joined: String = runs.concat();
-        push_term(&joined, token, lowers);
+        // The join can spell a modifier word from innocent parts
+        // (`tes-t` → `test`); flags win over terms here as everywhere.
+        if !tag_modifier(&joined.to_lowercase(), flags) {
+            push_term(&joined, token, lowers);
+        }
     }
 }
 
@@ -465,8 +473,16 @@ fn push_term(piece: &str, original: &str, lowers: &mut BTreeMap<String, ParsedTe
 
 /// Record an identifier fragment as a term without the stopword rule.
 /// Qualified members and camelCase pieces are signal by construction (see
-/// [`collect_terms`]); shape rules still apply.
-fn push_identifier_piece(piece: &str, lowers: &mut BTreeMap<String, ParsedTerm>) {
+/// [`collect_terms`]); shape rules still apply, and modifier words stay
+/// flags — a `FlakyTest` sets `test_bias` instead of leaking `flaky`.
+fn push_identifier_piece(
+    piece: &str,
+    lowers: &mut BTreeMap<String, ParsedTerm>,
+    flags: &mut TaskFlags,
+) {
+    if tag_modifier(&piece.to_lowercase(), flags) {
+        return;
+    }
     if shape_dropped(piece) {
         return;
     }
@@ -733,6 +749,31 @@ mod tests {
                 "{banned} leaked as a term"
             );
         }
+    }
+
+    #[test]
+    fn identifier_fragments_keep_modifier_discipline() {
+        // `FlakyTest`/`config_value` mention modifiers inside identifiers:
+        // the flags fire, but the words never become terms — the same rule
+        // as plain tokens, or `test_bias` would be set twice over.
+        let parsed = parse_task("FlakyTest timeout in config_value");
+        assert!(parsed.flags.test_bias);
+        assert!(parsed.flags.config_bias);
+        for banned in ["test", "tests", "flaky", "config"] {
+            assert!(
+                !lowers(&parsed).contains(&banned),
+                "{banned} leaked as a term"
+            );
+        }
+        assert_eq!(lowers(&parsed), vec!["timeout", "value"]);
+    }
+
+    #[test]
+    fn joined_form_never_spells_a_modifier_word() {
+        // `tes-t` joins to `test`: flags win over terms here as everywhere.
+        let parsed = parse_task("tes-t timeout");
+        assert!(!lowers(&parsed).contains(&"test"));
+        assert_eq!(lowers(&parsed), vec!["tes", "timeout"]);
     }
 
     #[test]

@@ -98,6 +98,11 @@ pub struct SelectionSnapshot {
     /// when the index carries none (fresh/`empty` state). Whether an empty
     /// id disqualifies selection is cs-select's policy, not this loader's.
     pub snapshot_id: String,
+    /// Whether `meta.update_in_progress` is set: a previous incremental
+    /// update committed facts but never finalized, so derived rows and the
+    /// id above may be stale until the next update repairs them. The loader
+    /// reports this; refusing torn snapshots is cs-select's policy.
+    pub update_in_progress: bool,
 }
 
 /// Run one read-only query and collect its rows through `to_row`.
@@ -172,6 +177,9 @@ pub fn load_selection_snapshot(
         });
     }
     let snapshot_id = IndexDatabase::meta_value(conn, db_path, "snapshot_id")?.unwrap_or_default();
+    let update_in_progress =
+        IndexDatabase::meta_value(conn, db_path, crate::incremental::UPDATE_IN_PROGRESS_KEY)?
+            .is_some();
 
     let files = collect(
         conn,
@@ -250,6 +258,7 @@ pub fn load_selection_snapshot(
         symbols,
         edges,
         snapshot_id,
+        update_in_progress,
     })
 }
 

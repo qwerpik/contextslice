@@ -30,17 +30,30 @@ pub enum SelectError {
          build the index first, then reselect"
     )]
     EmptySnapshotId,
+    /// The snapshot names a build, but a torn incremental update left
+    /// facts and derived rows disagreeing: an id alone is not `Ready`.
+    /// Repair with the next incremental run (or rebuild), then reselect.
+    #[error(
+        "snapshot {0} is torn by an unfinished incremental update; \
+         run the next update (or rebuild the index), then reselect"
+    )]
+    StaleSnapshot(String),
 }
 
 /// The select-side readiness gate: accept only snapshots whose id names a
-/// committed build.
+/// committed, untorn build.
 ///
-/// [`cs_index`] loading is deliberately state-agnostic and returns empty
-/// vectors with the empty id on a fresh index; this function is where that
-/// output is refused, loudly, before any stage can treat "nothing indexed"
-/// as a result.
+/// [`cs_index`] loading is deliberately state-agnostic: it returns empty
+/// vectors with the empty id on a fresh index, and whatever the tables hold
+/// mid-update. This function is where both outputs are refused, loudly,
+/// before any stage can treat "nothing indexed" — or "torn index" — as a
+/// result. A non-empty id alone is not `Ready`: only an id with no pending
+/// update enters selection.
 #[must_use = "a rejected snapshot must not enter selection"]
 pub fn require_ready_snapshot(snapshot: &SelectionSnapshot) -> Result<(), SelectError> {
+    if snapshot.update_in_progress {
+        return Err(SelectError::StaleSnapshot(snapshot.snapshot_id.clone()));
+    }
     if snapshot.snapshot_id.is_empty() {
         return Err(SelectError::EmptySnapshotId);
     }
@@ -97,6 +110,7 @@ mod linkage_tests {
                 weight: 0.6,
             }],
             snapshot_id: "test-build".to_owned(),
+            update_in_progress: false,
         };
         let task_text = "Fix the `Session.Validate` timeout in auth/session.go";
 
@@ -119,12 +133,33 @@ mod linkage_tests {
             symbols: Vec::new(),
             edges: Vec::new(),
             snapshot_id: String::new(),
+            update_in_progress: false,
         };
         let err = require_ready_snapshot(&snapshot).expect_err("empty id must not enter");
         assert_eq!(err, SelectError::EmptySnapshotId);
         assert!(
             err.to_string().contains("build the index first"),
             "the message must say what to do: {err}"
+        );
+    }
+
+    #[test]
+    fn torn_snapshot_is_refused_even_with_a_stale_id() {
+        // A crashed incremental update leaves facts committed with the old
+        // id still in meta: the id is non-empty, so only the torn flag can
+        // catch it. An id alone is not `Ready`.
+        let snapshot = SelectionSnapshot {
+            files: Vec::new(),
+            symbols: Vec::new(),
+            edges: Vec::new(),
+            snapshot_id: "stale-build".to_owned(),
+            update_in_progress: true,
+        };
+        let err = require_ready_snapshot(&snapshot).expect_err("torn must not enter");
+        assert_eq!(err, SelectError::StaleSnapshot("stale-build".to_owned()));
+        assert!(
+            err.to_string().contains("unfinished incremental update"),
+            "the message must name the cause: {err}"
         );
     }
 }
