@@ -322,8 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn s4_scores_follow_b_over_b_plus_3() {
-        use crate::task::parse_task;
+    fn s4_scores_follow_b_over_b_plus_3() {        use crate::task::parse_task;
         use crate::tuning;
         let snapshot = scored_snapshot();
         let index = SeedIndex::build(&snapshot).expect("build");
@@ -353,5 +352,70 @@ mod tests {
             scores.iter().any(|s| (s.score - expected).abs() < 1e-12),
             "a score matches weight*b/(b+3) = {expected}, got {scores:?}"
         );
+    }
+
+    #[test]
+    fn seed_scores_ignore_snapshot_input_order() {
+        use crate::task::parse_task;
+        // D6 floor item 1 scoped to S1/S4: shuffling the snapshot's vector
+        // inputs must yield the identical SlicePlan inputs. rowids follow
+        // insertion order, so reversed inputs exercise every tie-break.
+        let forward = scored_snapshot();
+        let mut backward = forward.clone();
+        backward.files.reverse();
+        backward.symbols.reverse();
+        let task = parse_task("login timeout");
+        let fi = SeedIndex::build(&forward).expect("build");
+        let bi = SeedIndex::build(&backward).expect("build");
+        assert_eq!(
+            fi.seed_s1(&task.terms),
+            bi.seed_s1(&task.terms),
+            "S1 identical under reversed inputs"
+        );
+        assert_eq!(
+            fi.seed_s4(&task.terms),
+            bi.seed_s4(&task.terms),
+            "S4 identical under reversed inputs"
+        );
+    }
+
+    #[test]
+    fn tied_scores_break_by_path_regardless_of_insertion() {
+        use crate::task::parse_task;
+        // Three same-named symbols in three files: identical folded 2.1
+        // scores, so ONLY the path tie-break orders them. Inserted
+        // scrambled (b, a, m) to prove rowids never leak through.
+        let files = ["b.rs", "a.rs", "m.rs"].map(|path| SnapshotFile {
+            path: path.to_owned(),
+            lang: "rs".to_owned(),
+            size: 10,
+            package: None,
+        });
+        let symbols = files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| SnapshotSymbol {
+                file: f.path.clone(),
+                name: "login".to_owned(),
+                kind: "func".to_owned(),
+                exported: false,
+                line: i as i64,
+                container: None,
+                signature: None,
+                doc: None,
+            })
+            .collect();
+        let snapshot = SelectionSnapshot {
+            files: files.into(),
+            symbols,
+            edges: Vec::new(),
+            snapshot_id: "t".to_owned(),
+            update_in_progress: false,
+        };
+        let index = SeedIndex::build(&snapshot).expect("build");
+        let task = parse_task("login");
+        let scores = index.seed_s1(&task.terms);
+        let order: Vec<&str> = scores.iter().map(|s| s.path.as_str()).collect();
+        assert_eq!(order, vec!["a.rs", "b.rs", "m.rs"]);
     }
 }
