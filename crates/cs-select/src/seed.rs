@@ -9,6 +9,9 @@
 
 use cs_index::SelectionSnapshot;
 
+use crate::task::ParsedTerm;
+use crate::tuning;
+
 /// One signal's score contribution for one file (ALGORITHM §5: seed sums
 /// signal_weight × signal_value per file; the sum itself is a later stage).
 #[derive(Debug, Clone, PartialEq)]
@@ -40,15 +43,95 @@ pub struct SeedIndex {
 impl SeedIndex {
     /// Build the in-memory symbol table for one selection.
     ///
+    /// One FTS5 row per snapshot symbol (`name`, `file`, `kind`); the table
+    /// is the only S1/S4 index the selection reads.
+    ///
     /// # Errors
     ///
     /// Returns [`rusqlite::Error`] if the in-memory database or the FTS5
     /// table cannot be created.
-    pub fn build(
-        _snapshot: &SelectionSnapshot,
-    ) -> Result<Self, rusqlite::Error> {
+    pub fn build(snapshot: &SelectionSnapshot) -> Result<Self, rusqlite::Error> {
         let conn = rusqlite::Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE seed_fts USING fts5(name, file, kind, tokenize='unicode61');",
+        )?;
+        {
+            let mut insert = conn.prepare(
+                "INSERT INTO seed_fts (name, file, kind) VALUES (?1, ?2, ?3)",
+            )?;
+            for symbol in &snapshot.symbols {
+                insert.execute(rusqlite::params![
+                    symbol.name,
+                    symbol.file,
+                    symbol.kind
+                ])?;
+            }
+        }
         Ok(Self { conn })
+    }
+
+    /// S1 seed contributions for parsed task terms (ALGORITHM §5).
+    ///
+    /// Each distinct term runs as an FTS5 phrase query for candidates; the
+    /// exact/folded classification is then decided in Rust by string
+    /// comparison, never by the tokenizer: a candidate whose name equals
+    /// one of the term's original-case spellings scores exact
+    /// (`S1_EXACT_SYMBOL_WEIGHT × S1_CASE_SENSITIVE_VALUE`), a
+    /// case-folded-only match scores folded (`× S1_CASE_INSENSITIVE_VALUE`).
+    /// Output is sorted by (score desc, path asc, symbol asc) — the sort
+    /// runs on candidate rows before mapping to [`SeedScore`], so equal
+    /// entries can never leak insertion order.
+    #[must_use]
+    pub fn seed_s1(&self, terms: &[ParsedTerm]) -> Vec<SeedScore> {
+        let mut rows: Vec<(f64, String, String, SeedSignal)> = Vec::new();
+        for term in terms {
+            // Double-quoted FTS5 phrases are literal: the only character
+            // needing escape is the quote itself.
+            let phrase = format!("\"{}\"", term.lower.replace('"', "\"\""));
+            let mut query = match self.conn.prepare(
+                "SELECT file, name FROM seed_fts WHERE seed_fts MATCH ?1",
+            ) {
+                Ok(query) => query,
+                Err(_) => continue,
+            };
+            let candidates = query.query_map([phrase], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            });
+            let candidates = match candidates {
+                Ok(candidates) => candidates,
+                Err(_) => continue,
+            };
+            for candidate in candidates.flatten() {
+                let (file, name) = candidate;
+                let (value, signal) = if term.originals.contains(&name) {
+                    (
+                        tuning::S1_CASE_SENSITIVE_VALUE,
+                        SeedSignal::S1Exact,
+                    )
+                } else if name.to_lowercase() == term.lower {
+                    (
+                        tuning::S1_CASE_INSENSITIVE_VALUE,
+                        SeedSignal::S1Folded,
+                    )
+                } else {
+                    continue;
+                };
+                rows.push((tuning::S1_EXACT_SYMBOL_WEIGHT * value, file, name, signal));
+            }
+        }
+        rows.sort_by(|a, b| {
+            b.0.total_cmp(&a.0)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        rows
+            .into_iter()
+            .map(|(score, path, _, signal)| SeedScore {
+                path,
+                score,
+                signal,
+            })
+            .collect()
     }
 }
 
@@ -76,7 +159,7 @@ mod tests {
             symbols: vec![
                 SnapshotSymbol {
                     file: "auth/session.go".to_owned(),
-                    name: "SessionTimeout".to_owned(),
+                    name: "Login".to_owned(),
                     kind: "func".to_owned(),
                     exported: true,
                     line: 10,
@@ -86,7 +169,7 @@ mod tests {
                 },
                 SnapshotSymbol {
                     file: "auth/other.go".to_owned(),
-                    name: "sessiontimeout".to_owned(),
+                    name: "login".to_owned(),
                     kind: "func".to_owned(),
                     exported: false,
                     line: 4,
@@ -118,5 +201,57 @@ mod tests {
     fn index_builds_from_a_snapshot() {
         let snapshot = scored_snapshot();
         let _index = SeedIndex::build(&snapshot).expect("in-memory build");
+    }
+
+    #[test]
+    fn s1_exact_beats_folded_with_spec_values() {
+        use crate::task::parse_task;
+        let snapshot = scored_snapshot();
+        let index = SeedIndex::build(&snapshot).expect("build");
+        // "Login" stays one term (single run, single piece); the FTS phrase
+        // matches both folded tokens, and Rust classifies exact vs folded.
+        // NOTE (v1 scope): camelCase task text like "SessionTimeout" splits
+        // into pieces before seeding, so multi-piece exact names match only
+        // via their folded pieces — whole-name joining is a later stage.
+        let task = parse_task("Login");
+        let scores = index.seed_s1(&task.terms);
+        assert_eq!(scores.len(), 2, "both symbols match, got {scores:?}");
+        assert_eq!(scores[0].path, "auth/session.go");
+        assert_eq!(scores[0].score, 3.0, "S1 exact: 3.0 x 1.0");
+        assert_eq!(scores[0].signal, SeedSignal::S1Exact);
+        assert_eq!(scores[1].path, "auth/other.go");
+        assert!(
+            (scores[1].score - 3.0 * 0.7).abs() < 1e-12,
+            "S1 folded: 3.0 x 0.7, got {}",
+            scores[1].score
+        );
+        assert_eq!(scores[1].signal, SeedSignal::S1Folded);
+    }
+
+    #[test]
+    fn s1_no_match_yields_no_scores() {
+        use crate::task::parse_task;
+        let snapshot = scored_snapshot();
+        let index = SeedIndex::build(&snapshot).expect("build");
+        let task = parse_task("zxqvkw");
+        assert!(index.seed_s1(&task.terms).is_empty());
+    }
+
+    #[test]
+    fn s1_output_order_is_score_then_path_then_symbol() {
+        use crate::task::parse_task;
+        let snapshot = scored_snapshot();
+        let index = SeedIndex::build(&snapshot).expect("build");
+        // Both symbols fold-match "login": tied 2.1 scores must
+        // break by path asc, deterministically, on every run.
+        let task = parse_task("login");
+        let scores = index.seed_s1(&task.terms);
+        assert_eq!(scores.len(), 2);
+        assert!(scores[0].score >= scores[1].score);
+        let order: Vec<&str> = scores.iter().map(|s| s.path.as_str()).collect();
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(order, sorted, "tied scores break by path asc");
+        assert_eq!(index.seed_s1(&task.terms), scores, "same order twice");
     }
 }
