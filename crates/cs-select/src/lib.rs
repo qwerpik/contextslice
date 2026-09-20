@@ -8,10 +8,12 @@
 //! [`require_ready_snapshot`] is the select-side policy the index loader
 //! defers to: a snapshot with no committed id never enters selection.
 
+pub mod seed;
 pub mod task;
 pub mod tuning;
 
-pub use task::{parse_task, Hints, ParsedTask, ParsedTerm, TaskFlags};
+pub use seed::{SeedScore, SeedSignal};
+pub use task::{Hints, ParsedTask, ParsedTerm, TaskFlags, parse_task};
 
 use cs_index::SelectionSnapshot;
 
