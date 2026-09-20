@@ -62,9 +62,13 @@ pub struct SnapshotSymbol {
     pub line: i64,
     /// Enclosing receiver type for methods, `None` for free symbols.
     pub container: Option<String>,
-    /// One-line signature when extraction captured one.
+    /// One-line signature when extraction captured one. Stored index facts
+    /// re-exposed, not source text: the storage contract is spans plus
+    /// signatures, never file contents (ARCHITECTURE.md §8) — ruling
+    /// (2026-09-20): carrying these fields through the snapshot complies.
     pub signature: Option<String>,
-    /// Doc comment when extraction captured one.
+    /// Doc comment when extraction captured one (same contract note as
+    /// `signature` above).
     pub doc: Option<String>,
 }
 

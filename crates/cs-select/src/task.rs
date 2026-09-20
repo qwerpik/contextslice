@@ -12,6 +12,13 @@
 //! NFKC-only compatibility cases (ligatures, CJK compatibility forms) are a
 //! known, documented gap, and whitespace-like compatibility characters are
 //! irrelevant because they are separators, not term characters.
+//!
+//! Ruling (2026-09-20): gap accepted, not scheduled. UAX #15 leaves ASCII
+//! text unaffected by every normalization form, and the indexed corpus is
+//! ASCII identifiers; normalizing task text alone could not fix matching
+//! against unnormalized identifiers anyway — half a fix for a full
+//! `unicode-normalization` table dependency against the ADR-011 freeze.
+//! Revisit when non-ASCII identifier language tiers land.
 
 use std::collections::{BTreeMap, BTreeSet};
 
