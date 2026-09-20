@@ -33,6 +33,7 @@ pub mod incremental;
 pub mod index_pass;
 pub mod resolve_pass;
 mod schema;
+pub mod selection_snapshot;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -48,6 +49,10 @@ pub use index_pass::{
 };
 pub use resolve_pass::resolve_facts;
 pub use schema::{initialize, SCHEMA_SQL, SCHEMA_VERSION};
+pub use selection_snapshot::{
+    SelectionSnapshot, SnapshotEdge, SnapshotFile, SnapshotPackage, SnapshotSymbol,
+    MAX_SNAPSHOT_ROWS,
+};
 
 /// Everything that can go wrong at the storage layer. Every variant is
 /// either actionable ("rebuild the index") or a reportable defect
@@ -106,6 +111,22 @@ pub enum IndexError {
     /// no busy timeout).
     #[error("another contextslice process is using the index; wait for it to finish")]
     Locked,
+    /// The index holds more snapshot rows than the read seam loads in one
+    /// call. Loading everything is the D2 contract, so an index past this
+    /// bound is refused loudly instead of `OOM`ing selection.
+    #[error(
+        "index at {path} holds {rows} snapshot rows, over the {limit}-row in-memory bound; \
+         narrow the scope (rebuild on a subtree) — streaming selection arrives with the seed stage"
+    )]
+    TooLarge {
+        /// The index path involved.
+        path: PathBuf,
+        /// Total rows across `files`, `symbols`, and `edges`.
+        rows: u64,
+        /// The bound that was exceeded
+        /// ([`crate::selection_snapshot::MAX_SNAPSHOT_ROWS`]).
+        limit: u64,
+    },
 }
 
 /// The index lifecycle states (ADR-021 D3).
@@ -428,6 +449,23 @@ impl IndexDatabase {
     /// Returns an [`IndexError`] if the database queries fail.
     pub fn build_exported_index(&self) -> Result<ExportedIndex, IndexError> {
         index_pass::build_exported_index(&self.conn, &self.path)
+    }
+
+    /// Load the selection read-side snapshot (ADR-023 D2): every indexed
+    /// file, symbol, and edge as plain owned data, plus the committed
+    /// `snapshot_id`.
+    ///
+    /// Read-only and state-agnostic: nothing is written and no lifecycle
+    /// gate is applied here. On a fresh or empty index this returns empty
+    /// vectors and the empty `snapshot_id`; rejecting a snapshot that is not
+    /// [`IndexState::Ready`] is cs-select's policy, enforced on the select
+    /// side.
+    ///
+    /// # Errors
+    ///
+    /// Propagates SQLite failures through the [`IndexError`] funnel.
+    pub fn load_selection_snapshot(&self) -> Result<SelectionSnapshot, IndexError> {
+        selection_snapshot::load_selection_snapshot(&self.conn, &self.path)
     }
 
     /// Run Pass 3: package-by-package resolution and derived row write-through.

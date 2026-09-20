@@ -16,3 +16,5 @@ tiktoken-rs.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# D3/D6/D7 re-add rusqlite, serde_json, and proptest with the stages that
+# consume them (dropped while unused: no compiled target references them).
