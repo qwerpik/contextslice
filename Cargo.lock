@@ -390,6 +390,7 @@ name = "cs-select"
 version = "0.1.0"
 dependencies = [
  "cs-index",
+ "rusqlite",
  "serde",
  "thiserror",
  "tiktoken-rs",

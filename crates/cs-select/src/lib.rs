@@ -13,7 +13,7 @@ pub mod task;
 pub mod tuning;
 
 pub use seed::{SeedScore, SeedSignal};
-pub use task::{Hints, ParsedTask, ParsedTerm, TaskFlags, parse_task};
+pub use task::{parse_task, Hints, ParsedTask, ParsedTerm, TaskFlags};
 
 use cs_index::SelectionSnapshot;
 

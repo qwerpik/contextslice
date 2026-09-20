@@ -3,9 +3,8 @@
 //! per-selection in-memory FTS5 table built from the snapshot's symbols.
 //!
 //! The table lives exactly as long as the selection: [`SeedIndex::build`]
-//! creates it from a [`SelectionSnapshot`](cs_index::SelectionSnapshot),
-//! and dropping the index drops the table. Selection never writes
-//! index-adjacent state.
+//! creates it from a [`cs_index::SelectionSnapshot`], and dropping the
+//! index drops the table. Selection never writes index-adjacent state.
 
 use cs_index::SelectionSnapshot;
 
@@ -13,7 +12,7 @@ use crate::task::ParsedTerm;
 use crate::tuning;
 
 /// One signal's score contribution for one file (ALGORITHM §5: seed sums
-/// signal_weight × signal_value per file; the sum itself is a later stage).
+/// `signal_weight` × `signal_value` per file; the sum itself is a later stage).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SeedScore {
     /// Repo-relative file path receiving the contribution.
@@ -58,15 +57,10 @@ impl SeedIndex {
             "CREATE VIRTUAL TABLE seed_fts USING fts5(name, file, kind, tokenize='unicode61');",
         )?;
         {
-            let mut insert = conn.prepare(
-                "INSERT INTO seed_fts (name, file, kind) VALUES (?1, ?2, ?3)",
-            )?;
+            let mut insert =
+                conn.prepare("INSERT INTO seed_fts (name, file, kind) VALUES (?1, ?2, ?3)")?;
             for symbol in &snapshot.symbols {
-                insert.execute(rusqlite::params![
-                    symbol.name,
-                    symbol.file,
-                    symbol.kind
-                ])?;
+                insert.execute(rusqlite::params![symbol.name, symbol.file, symbol.kind])?;
             }
         }
         Ok(Self { conn })
@@ -90,31 +84,24 @@ impl SeedIndex {
             // Double-quoted FTS5 phrases are literal: the only character
             // needing escape is the quote itself.
             let phrase = format!("\"{}\"", term.lower.replace('"', "\"\""));
-            let mut query = match self.conn.prepare(
-                "SELECT file, name FROM seed_fts WHERE seed_fts MATCH ?1",
-            ) {
-                Ok(query) => query,
-                Err(_) => continue,
+            let Ok(mut query) = self
+                .conn
+                .prepare("SELECT file, name FROM seed_fts WHERE seed_fts MATCH ?1")
+            else {
+                continue;
             };
             let candidates = query.query_map([phrase], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             });
-            let candidates = match candidates {
-                Ok(candidates) => candidates,
-                Err(_) => continue,
+            let Ok(candidates) = candidates else {
+                continue;
             };
             for candidate in candidates.flatten() {
                 let (file, name) = candidate;
                 let (value, signal) = if term.originals.contains(&name) {
-                    (
-                        tuning::S1_CASE_SENSITIVE_VALUE,
-                        SeedSignal::S1Exact,
-                    )
+                    (tuning::S1_CASE_SENSITIVE_VALUE, SeedSignal::S1Exact)
                 } else if name.to_lowercase() == term.lower {
-                    (
-                        tuning::S1_CASE_INSENSITIVE_VALUE,
-                        SeedSignal::S1Folded,
-                    )
+                    (tuning::S1_CASE_INSENSITIVE_VALUE, SeedSignal::S1Folded)
                 } else {
                     continue;
                 };
@@ -126,8 +113,7 @@ impl SeedIndex {
                 .then_with(|| a.1.cmp(&b.1))
                 .then_with(|| a.2.cmp(&b.2))
         });
-        rows
-            .into_iter()
+        rows.into_iter()
             .map(|(score, path, _, signal)| SeedScore {
                 path,
                 score,
@@ -150,18 +136,17 @@ impl SeedIndex {
         let mut rows: Vec<(f64, String)> = Vec::new();
         for term in terms {
             let phrase = format!("\"{}\"", term.lower.replace('"', "\"\""));
-            let mut query = match self.conn.prepare(
-                "SELECT file, -bm25(seed_fts) FROM seed_fts WHERE seed_fts MATCH ?1",
-            ) {
-                Ok(query) => query,
-                Err(_) => continue,
+            let Ok(mut query) = self
+                .conn
+                .prepare("SELECT file, -bm25(seed_fts) FROM seed_fts WHERE seed_fts MATCH ?1")
+            else {
+                continue;
             };
             let candidates = query.query_map([phrase], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
             });
-            let candidates = match candidates {
-                Ok(candidates) => candidates,
-                Err(_) => continue,
+            let Ok(candidates) = candidates else {
+                continue;
             };
             for candidate in candidates.flatten() {
                 let (file, b) = candidate;
@@ -173,8 +158,7 @@ impl SeedIndex {
             }
         }
         rows.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        rows
-            .into_iter()
+        rows.into_iter()
             .map(|(score, path)| SeedScore {
                 path,
                 score,
@@ -241,7 +225,11 @@ mod tests {
             signal: SeedSignal::S1Exact,
         };
         assert_eq!(score.path, "auth/session.go");
-        assert_eq!(score.score, 3.0);
+        assert!(
+            (score.score - 3.0).abs() < 1e-12,
+            "score carries, got {}",
+            score.score
+        );
         assert_eq!(score.signal, SeedSignal::S1Exact);
         assert_ne!(score.signal, SeedSignal::S1Folded);
     }
@@ -266,7 +254,11 @@ mod tests {
         let scores = index.seed_s1(&task.terms);
         assert_eq!(scores.len(), 2, "both symbols match, got {scores:?}");
         assert_eq!(scores[0].path, "auth/session.go");
-        assert_eq!(scores[0].score, 3.0, "S1 exact: 3.0 x 1.0");
+        assert!(
+            (scores[0].score - 3.0).abs() < 1e-12,
+            "S1 exact: 3.0 x 1.0, got {}",
+            scores[0].score
+        );
         assert_eq!(scores[0].signal, SeedSignal::S1Exact);
         assert_eq!(scores[1].path, "auth/other.go");
         assert!(
@@ -287,7 +279,8 @@ mod tests {
     }
 
     #[test]
-    fn s1_output_order_is_score_then_path_then_symbol() {        use crate::task::parse_task;
+    fn s1_output_order_is_score_then_path_then_symbol() {
+        use crate::task::parse_task;
         let snapshot = scored_snapshot();
         let index = SeedIndex::build(&snapshot).expect("build");
         // Both symbols fold-match "login": tied 2.1 scores must
@@ -322,7 +315,8 @@ mod tests {
     }
 
     #[test]
-    fn s4_scores_follow_b_over_b_plus_3() {        use crate::task::parse_task;
+    fn s4_scores_follow_b_over_b_plus_3() {
+        use crate::task::parse_task;
         use crate::tuning;
         let snapshot = scored_snapshot();
         let index = SeedIndex::build(&snapshot).expect("build");
@@ -399,7 +393,7 @@ mod tests {
                 name: "login".to_owned(),
                 kind: "func".to_owned(),
                 exported: false,
-                line: i as i64,
+                line: i64::try_from(i).expect("three fixtures fit in i64"),
                 container: None,
                 signature: None,
                 doc: None,
