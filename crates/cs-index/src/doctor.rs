@@ -1248,7 +1248,7 @@ mod tests {
             "must report fast, stalled {:?}",
             started.elapsed()
         );
-        assert!(!diags.is_empty());
+        assert!(!diags.is_empty(), "expected diagnostics");
 
         blocker.execute("ROLLBACK", []).expect("release");
         Doctor::repair_file(&db_path, RepairPolicy::ResetToEmpty).expect("repair after release");

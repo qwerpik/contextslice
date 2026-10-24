@@ -9,7 +9,7 @@
 //! qualifiers come from package clauses (never path tails — chi's `/v5`
 //! module path declares `package chi`). It does not know receiver types,
 //! method sets, or local scoping, and every consequence of that is recorded
-//! as an [`UnboundReason`](crate::UnboundReason) rather than guessed around.
+//! as an [`UnboundReason`] rather than guessed around.
 //!
 //! # Design decisions (ADR-018)
 //!
