@@ -12,6 +12,9 @@
 //! that any single-step test cannot see.
 
 #![forbid(unsafe_code)]
+// The script includes an unreadable-file step that needs Unix permissions,
+// so the whole gauntlet (and its helpers) only builds on Unix.
+#![cfg(unix)]
 
 use std::fs;
 use std::path::Path;
