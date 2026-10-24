@@ -628,7 +628,7 @@ mod tests {
         );
         assert!(!parsed.flags.test_bias);
         assert!(!parsed.flags.config_bias);
-        assert!(parsed.hints.paths.is_empty());
+        assert!(parsed.hints.paths.is_empty(), "{:?}", parsed.hints.paths);
         let remember = parsed
             .terms
             .iter()
@@ -742,7 +742,7 @@ mod tests {
             "got {:?}",
             parsed.hints.symbols
         );
-        assert!(parsed.hints.paths.is_empty());
+        assert!(parsed.hints.paths.is_empty(), "{:?}", parsed.hints.paths);
     }
 
     #[test]

@@ -275,7 +275,8 @@ mod tests {
         let snapshot = scored_snapshot();
         let index = SeedIndex::build(&snapshot).expect("build");
         let task = parse_task("zxqvkw");
-        assert!(index.seed_s1(&task.terms).is_empty());
+        let seeds = index.seed_s1(&task.terms);
+        assert!(seeds.is_empty(), "{seeds:?}");
     }
 
     #[test]

@@ -32,13 +32,13 @@ keywords = ["context", "llm", "tree-sitter", "coding-agents", "code-search"]
 # Pins and their justification live in docs/adr/ (see ADR-011 for the manifest).
 [workspace.dependencies]
 # --- internal ---
-cs-scanner = { path = "crates/cs-scanner" }
-cs-extract = { path = "crates/cs-extract" }
-cs-resolve = { path = "crates/cs-resolve" }
-cs-index = { path = "crates/cs-index" }
-cs-git = { path = "crates/cs-git" }
-cs-select = { path = "crates/cs-select" }
-cs-render = { path = "crates/cs-render" }
+cs-scanner = { path = "crates/cs-scanner", version = "=0.1.0" }
+cs-extract = { path = "crates/cs-extract", version = "=0.1.0" }
+cs-resolve = { path = "crates/cs-resolve", version = "=0.1.0" }
+cs-index = { path = "crates/cs-index", version = "=0.1.0" }
+cs-git = { path = "crates/cs-git", version = "=0.1.0" }
+cs-select = { path = "crates/cs-select", version = "=0.1.0" }
+cs-render = { path = "crates/cs-render", version = "=0.1.0" }
 
 # --- repository traversal (ARCHITECTURE §4.1) ---
 ignore = "0.4.33"

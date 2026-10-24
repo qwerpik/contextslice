@@ -683,7 +683,7 @@ mod tests {
     fn empty_directory_scans_to_empty() {
         let dir = tempfile::tempdir().expect("tempdir");
         let files = scan(dir.path(), &ScanConfig::default()).expect("scan");
-        assert!(files.is_empty());
+        assert!(files.is_empty(), "{files:?}");
     }
 
     /// An unreadable *subdirectory* must degrade, not abort the scan.

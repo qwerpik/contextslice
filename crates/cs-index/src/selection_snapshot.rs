@@ -489,8 +489,8 @@ mod tests {
         let snap = db.load_selection_snapshot().expect("load");
         assert_eq!(snap.files.len(), 1);
         assert!(snap.files[0].package.is_none(), "NULL package_id → None");
-        assert!(snap.symbols.is_empty());
-        assert!(snap.edges.is_empty());
+        assert!(snap.symbols.is_empty(), "{:?}", snap.symbols);
+        assert!(snap.edges.is_empty(), "{:?}", snap.edges);
     }
 
     #[test]
@@ -503,9 +503,9 @@ mod tests {
         let snap = db
             .load_selection_snapshot()
             .expect("an empty index is not a loader error");
-        assert!(snap.files.is_empty());
-        assert!(snap.symbols.is_empty());
-        assert!(snap.edges.is_empty());
+        assert!(snap.files.is_empty(), "{:?}", snap.files);
+        assert!(snap.symbols.is_empty(), "{:?}", snap.symbols);
+        assert!(snap.edges.is_empty(), "{:?}", snap.edges);
         assert_eq!(
             snap.snapshot_id, "",
             "no meta.snapshot_id exists yet; policy is cs-select's"

@@ -510,7 +510,7 @@ mod tests {
         let pkg_key = (String::new(), "main".to_owned());
         if let Some(pkg) = index.packages.get(&pkg_key) {
             // main package has files
-            assert!(!pkg.files.is_empty());
+            assert!(!pkg.files.is_empty(), "package has no files");
         }
 
         // Check exported defs in nested package

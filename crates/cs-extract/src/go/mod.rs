@@ -7,7 +7,7 @@
 //!
 //! # How it works
 //!
-//! 1. [`parse_source`](crate::parse_source) produces the tree and an honest
+//! 1. [`parse_source`] produces the tree and an honest
 //!    [`ParseStatus`].
 //! 2. Three owned `.scm` queries (see `queries/`, ADR-012) capture
 //!    definition nodes + names + doc comments, raw name/field/type
@@ -1432,7 +1432,7 @@ mod tests {
     fn garbage_file_is_partial_with_no_defs() {
         let file = extract("def hello():\n    print('hi')\n", Language::Go).expect("go");
         assert_eq!(file.status, ParseStatus::Partial);
-        assert!(file.defs.is_empty());
+        assert!(file.defs.is_empty(), "{:?}", file.defs);
         assert!(file.package_name.is_none());
     }
 
@@ -1440,7 +1440,7 @@ mod tests {
     fn empty_and_package_only_files() {
         let empty = extract("", Language::Go).expect("go");
         assert_eq!(empty.status, ParseStatus::Ok);
-        assert!(empty.defs.is_empty());
+        assert!(empty.defs.is_empty(), "{:?}", empty.defs);
         assert!(empty.package_name.is_none());
 
         let only = extract("package only\n", Language::Go).expect("go");
